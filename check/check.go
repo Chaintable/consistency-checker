@@ -10,7 +10,6 @@ import (
 
 	"log"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/segmentio/kafka-go"
 
@@ -137,8 +136,7 @@ func (c *Checker) getValidationHashWithReTry(blockCtx *types.BlockContext) (int6
 }
 
 func (c *Checker) getValidationHashMany(blockNotice *types.BlockChangeNotification) ([]int64, error) {
-	blockIDs := make([]common.Hash, len(blockNotice.NewBlocks))
-	validationHashes := make([]int64, len(blockIDs))
+	validationHashes := make([]int64, len(blockNotice.NewBlocks))
 	var err error
 	for i, block := range blockNotice.NewBlocks {
 		validationHashes[i], err = c.getValidationHashWithReTry(&block)
@@ -175,6 +173,9 @@ func (c *Checker) remote_drop_blocks(blockNotice *types.BlockChangeNotification)
 
 func (c *Checker) check(kafkaLatestBlockNumber uint64) (*types.ReplicaStateChangeNotification, error) {
 	nodeStates := nodes.NodeMap.CheckAll(kafkaLatestBlockNumber)
+	if len(nodeStates) == 0 {
+		return nil, fmt.Errorf("no node")
+	}
 	readyNodes := 0
 	for _, nodeState := range nodeStates {
 		if nodeState.StateType == 1 {
@@ -200,17 +201,19 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*types.ReplicaS
 	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber {
 		return nil, nil
 	}
+	var err error
+	var replicaStateChange *types.ReplicaStateChangeNotification
 	for i := 0; i < 3; i++ {
-		replicaStateChange, err := c.check(kafkaLatestBlockNumber)
+		replicaStateChange, err = c.check(kafkaLatestBlockNumber)
 		if err != nil {
-			return nil, err
+			log.Printf("check error %+v", err)
 		}
 		if replicaStateChange != nil {
 			return replicaStateChange, nil
 		}
 		time.Sleep(time.Duration(c.confg.CheckInterval) * time.Millisecond)
 	}
-	return nil, fmt.Errorf("check many times but not ready")
+	return nil, fmt.Errorf("check many times but not ready: %v", err)
 }
 
 func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {

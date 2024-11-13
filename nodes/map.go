@@ -51,9 +51,9 @@ func (m *RWMap) GetAll() []Node {
 	return result
 }
 
-func (m *RWMap) CheckAll(knownedlatestBlockNumber uint64) []types.ReplicaState {
+func (m *RWMap) CheckAll(kafkaLatestBlockNumber uint64) []types.ReplicaState {
 	nodes := m.GetAll()
-	result := make([]types.ReplicaState, len(nodes))
+	result := make([]types.ReplicaState, 0)
 	lock := sync.Mutex{}
 
 	var wg sync.WaitGroup
@@ -62,12 +62,13 @@ func (m *RWMap) CheckAll(knownedlatestBlockNumber uint64) []types.ReplicaState {
 		wg.Add(1)
 		go func(node Node) {
 			defer wg.Done()
-			state := node.Check(knownedlatestBlockNumber)
+			state := node.Check(kafkaLatestBlockNumber)
 			lock.Lock()
 			result = append(result, state)
 			lock.Unlock()
 		}(node)
 	}
+	wg.Wait()
 
 	return result
 }

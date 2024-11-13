@@ -94,7 +94,7 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 	return uint64(blockNum), nil
 }
 
-func (node *Node) Check(knownedlatestBlockNumber uint64) types.ReplicaState {
+func (node *Node) Check(kafkaLatestBlockNumber uint64) types.ReplicaState {
 	latestBlockNumber, err := node.EthBlockNumber(10 * time.Millisecond)
 	if err != nil {
 		return types.ReplicaState{
@@ -103,7 +103,7 @@ func (node *Node) Check(knownedlatestBlockNumber uint64) types.ReplicaState {
 			Meta:              node.Meta,
 		}
 	}
-	if latestBlockNumber >= knownedlatestBlockNumber {
+	if latestBlockNumber >= kafkaLatestBlockNumber {
 		return types.ReplicaState{
 			LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
 			StateType:         1,
