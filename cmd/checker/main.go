@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Chaintable/consistency_checker/check"
 	"github.com/Chaintable/consistency_checker/config"
 )
 
@@ -35,8 +36,22 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	config := parseCmdlineAndLoadConfig()
-	startHTTPServer(config)
+	log.Printf("[main] config: %+v", config)
+
+	checker, err := check.NewChecker(&config)
+	if err != nil {
+		log.Fatalf("[main] NewChecker error %+v", err)
+	}
+
+	go func() {
+		checker.Run()
+	}()
+
+	startHTTPServer(&config)
 
 	sig := <-sigChan
+
+	checker.Close()
+
 	log.Printf("[main] sig %v received, shutting down...", sig)
 }

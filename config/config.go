@@ -13,8 +13,8 @@ type Config struct {
 	CheckInterval                int      `yaml:"check_interval_ms"`
 	ChainID                      int      `yaml:"chain_id"`
 	ConsistencyDBPath            string   `yaml:"consistency_db_path"`
-	InnerS3Bucket                string   `yaml:"inner_s3_bucket"`
-	InnerS3Region                string   `yaml:"inner_s3_region"`
+	OuterS3Bucket                string   `yaml:"outer_s3_bucket"`
+	OuterS3Region                string   `yaml:"outer_s3_region"`
 	InnerBrokers                 []string `yaml:"inner_brokers"`
 	InnerReplicaStateChangeTopic string   `yaml:"inner_replica_state_topic"`
 	InnerNewBlockGroupID         string   `yaml:"inner_new_block_group_id"`

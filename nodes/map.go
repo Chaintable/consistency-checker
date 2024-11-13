@@ -44,7 +44,7 @@ func (m *RWMap) DeleteByIP(ip string) {
 func (m *RWMap) GetAll() []Node {
 	m.lock.RLock()
 	defer m.lock.RUnlock()
-	result := make([]Node, len(m.m))
+	result := make([]Node, 0)
 	for _, node := range m.m {
 		result = append(result, node)
 	}
