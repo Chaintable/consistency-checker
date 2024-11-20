@@ -3,7 +3,7 @@ ready_ratio: 0.8                                                  # Default read
 check_num: 3                                                      # Default number of checks
 check_interval_ms: 20                                             # Default interval for checks in milliseconds
 chain_id: "eth"                                                   # Default Chain ID (e.g., eth)
-consistency_db_path: "consistency_db"                             # Default path for consistency database
+consistency_db_path: "/data/eth/consistency_db"                             # Default path for consistency database
 outer_s3_bucket: "chaintable-pipeline-test"                       # Default inner S3 bucket name
 outer_s3_region: "ap-northeast-1"                                 # Default inner S3 region
 inner_brokers:                                                    # Default list of inner brokers
