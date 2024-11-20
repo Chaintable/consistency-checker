@@ -40,7 +40,6 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-region: ${{ env.AWS_REGION }}
-wangchengao marked this conversation as resolved.
 
       - name: Login to Amazon ECR
         id: login-ecr
