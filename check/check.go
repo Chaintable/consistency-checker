@@ -71,14 +71,13 @@ func (c *Checker) Close() {
 }
 
 func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error) {
-	s3Key := fmt.Sprintf("%s/%d/%s/", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	s3Key := fmt.Sprintf("%s/%d/%s", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
 	obj, err := c.outerS3Reader.GetObject(
 		context.Background(),
 		&s3.GetObjectInput{
 			Bucket: &c.confg.OuterS3Bucket,
 			Key:    &s3Key,
 		},
-		nil,
 	)
 	if err != nil {
 		return 0, err
@@ -114,7 +113,7 @@ func (c *Checker) getValidationHashMany(newBlocks []types.BlockContext) ([]int64
 	for i, block := range newBlocks {
 		validationHashes[i], err = c.getValidationHashWithReTry(&block)
 		if err != nil {
-			return nil, nil
+			return nil, err
 		}
 	}
 	return validationHashes, nil
@@ -214,6 +213,7 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	}
 	if replicaStateChange.LatestBlockNumber != nil {
 		c.ReplicaLatestBlockNumber = uint64(replicaStateChange.LatestBlockNumber.ToInt().Int64())
+		log.Printf("ReplicaLatestBlockNumber %d", c.ReplicaLatestBlockNumber)
 	}
 	if replicaStateChange != nil {
 		err = util.WriteReplicaStateChange(c.innerReplicaStateChangeWriter, replicaStateChange)
