@@ -313,6 +313,9 @@ func (c *Checker) Run() {
 					time.Sleep(1 * time.Second)
 					continue
 				} else {
+					if msg.Offset%100 == 0 {
+						log.Printf("CommitMessages last offset %d, blockNotice %v", msg.Offset, blockNotice)
+					}
 					break
 				}
 			}
