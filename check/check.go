@@ -1,11 +1,11 @@
 package check
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"math/big"
-	"strconv"
-	"strings"
 	"time"
 
 	"log"
@@ -19,7 +19,6 @@ import (
 	"github.com/Chaintable/pipeline/types"
 	"github.com/Chaintable/pipeline/util"
 
-	s3config "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
@@ -42,25 +41,6 @@ func NewKafkaReader(brokers []string, topic string, groupID string) *kafka.Reade
 	})
 }
 
-func NewKafkaWriter(brokers []string, topic string) *kafka.Writer {
-	return &kafka.Writer{
-		Addr:         kafka.TCP(brokers...),
-		Topic:        topic,
-		Balancer:     &kafka.Hash{},
-		RequiredAcks: kafka.RequireOne,
-		BatchSize:    1,
-	}
-}
-
-func NewS3Reader(region string) (*s3.Client, error) {
-	cfg, err := s3config.LoadDefaultConfig(context.TODO())
-	if err != nil {
-		return nil, err
-	}
-	client := s3.NewFromConfig(cfg)
-	return client, nil
-}
-
 func NewChecker(config *config.Config) (*Checker, error) {
 	err := db.OpenConsistencyDB(config.ConsistencyDBPath)
 	if err != nil {
@@ -68,17 +48,17 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
-	innerS3Reader, err := NewS3Reader(config.OuterS3Region)
+	innerS3Reader, err := util.NewS3Client(config.OuterS3Region)
 	if err != nil {
 		log.Printf("create s3 reader error %+v", err)
 		return nil, err
 	}
 
 	return &Checker{
-		innerNewBlockReader:           NewKafkaReader(config.InnerBrokers, config.InnerReplicaStateChangeTopic, config.InnerNewBlockGroupID),
-		innerReplicaStateChangeWriter: NewKafkaWriter(config.InnerBrokers, config.InnerReplicaStateChangeTopic),
+		innerNewBlockReader:           util.NewKafkaReader(config.InnerBrokers, config.InnerReplicaStateChangeTopic, config.InnerNewBlockGroupID),
+		innerReplicaStateChangeWriter: util.NewKafkaWriter(config.InnerBrokers, config.InnerReplicaStateChangeTopic),
 		outerS3Reader:                 innerS3Reader,
-		outerNewBlockWriter:           NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
+		outerNewBlockWriter:           util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
 		confg:                         config,
 		quit:                          make(chan struct{}),
 	}, nil
@@ -91,34 +71,27 @@ func (c *Checker) Close() {
 }
 
 func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error) {
-	chainID := (*hexutil.Big)(big.NewInt(int64(c.confg.ChainID)))
-	s3Key := fmt.Sprintf("%s/%s/", chainID.String(), blockCtx.Hash.String())
-	params := &s3.ListObjectsV2Input{
-		Bucket: &c.confg.OuterS3Bucket,
-		Prefix: &s3Key,
-	}
-	res, err := c.outerS3Reader.ListObjectsV2(context.Background(), params, nil)
+	s3Key := fmt.Sprintf("%s/%d/%s/", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	obj, err := c.outerS3Reader.GetObject(
+		context.Background(),
+		&s3.GetObjectInput{
+			Bucket: &c.confg.OuterS3Bucket,
+			Key:    &s3Key,
+		},
+		nil,
+	)
 	if err != nil {
 		return 0, err
 	}
-	if len(res.Contents) == 0 {
-		return 0, nil
+	defer obj.Body.Close()
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(obj.Body)
+	validation := types.BlockValidation{}
+	err = util.DecodeFromGzipJson(buf.Bytes(), &validation)
+	if err != nil {
+		return 0, err
 	}
-	for _, obj := range res.Contents {
-		after, found := strings.CutPrefix(*obj.Key, s3Key)
-		if !found {
-			continue
-		}
-		after = strings.TrimSuffix(after, "/")
-		// parse to int
-		validationHash, err := strconv.ParseInt(after, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return validationHash, nil
-
-	}
-	return 0, nil
+	return validation.ValidationHash, nil
 }
 
 func (c *Checker) getValidationHashWithReTry(blockCtx *types.BlockContext) (int64, error) {
@@ -135,10 +108,10 @@ func (c *Checker) getValidationHashWithReTry(blockCtx *types.BlockContext) (int6
 	return 0, fmt.Errorf("get validation hash many times but not ready")
 }
 
-func (c *Checker) getValidationHashMany(blockNotice *types.BlockChangeNotification) ([]int64, error) {
-	validationHashes := make([]int64, len(blockNotice.NewBlocks))
+func (c *Checker) getValidationHashMany(newBlocks []types.BlockContext) ([]int64, error) {
+	validationHashes := make([]int64, len(newBlocks))
 	var err error
-	for i, block := range blockNotice.NewBlocks {
+	for i, block := range newBlocks {
 		validationHashes[i], err = c.getValidationHashWithReTry(&block)
 		if err != nil {
 			return nil, nil
@@ -147,23 +120,35 @@ func (c *Checker) getValidationHashMany(blockNotice *types.BlockChangeNotificati
 	return validationHashes, nil
 }
 
-func (c *Checker) remoteBlock(blockCtx *types.BlockContext) error {
-	chainID := (*hexutil.Big)(big.NewInt(int64(c.confg.ChainID)))
-	s3Key := fmt.Sprintf("%s/%d/%s", chainID.String(), blockCtx.BlockNumber, blockCtx.Hash.String())
-	params := &s3.DeleteObjectInput{
+func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, blockValidation int64) error {
+	s3Key := fmt.Sprintf("%s/%d/%s", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	validation := types.BlockValidation{
+		ValidationHash: blockValidation,
+		IsFork:         true,
+	}
+	data, err := util.EncodeToJsonGzip(&validation)
+	if err != nil {
+		return nil
+	}
+	params := &s3.PutObjectInput{
 		Bucket: &c.confg.OuterS3Bucket,
 		Key:    &s3Key,
+		Body:   bytes.NewReader(data),
 	}
-	_, err := c.outerS3Reader.DeleteObject(context.Background(), params)
+	_, err = c.outerS3Reader.PutObject(context.Background(), params, nil)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *Checker) remote_drop_blocks(blockNotice *types.BlockChangeNotification) error {
-	for _, block := range blockNotice.DropBlocks {
-		err := c.remoteBlock(&block)
+func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) error {
+	for _, block := range dropBlocks {
+		blockValidation, err := c.getValidationHashWithReTry(&block)
+		if err != nil {
+			return err
+		}
+		err = c.rewriteBlock(&block, blockValidation)
 		if err != nil {
 			return err
 		}
@@ -182,28 +167,28 @@ func (c *Checker) check(kafkaLatestBlockNumber uint64) (*types.ReplicaStateChang
 			readyNodes++
 		}
 	}
+	// latestBlockNumber 是所有ready节点中，高度最低的节点的高度
+	latestBlockNumber := math.MaxInt64
 	if float64(readyNodes)/float64(len(nodeStates)) >= c.confg.ReadyRatio {
 		for _, nodeState := range nodeStates {
 			if nodeState.StateType == 1 {
-				if c.ReplicaLatestBlockNumber < nodeState.LatestBlockNumber.ToInt().Uint64() {
-					c.ReplicaLatestBlockNumber = nodeState.LatestBlockNumber.ToInt().Uint64()
+				if latestBlockNumber > int(nodeState.LatestBlockNumber.ToInt().Int64()) {
+					latestBlockNumber = int(nodeState.LatestBlockNumber.ToInt().Int64())
 				}
 			}
 		}
 		return &types.ReplicaStateChangeNotification{
-			LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(c.ReplicaLatestBlockNumber))),
+			LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
+			ReplicaStates:     nodeStates,
 		}, nil
 	}
 	return nil, nil
 }
 
 func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*types.ReplicaStateChangeNotification, error) {
-	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber {
-		return nil, nil
-	}
 	var err error
 	var replicaStateChange *types.ReplicaStateChangeNotification
-	for i := 0; i < 3; i++ {
+	for i := 0; i < c.confg.CheckNum; i++ {
 		replicaStateChange, err = c.check(kafkaLatestBlockNumber)
 		if err != nil {
 			log.Printf("check error %+v", err)
@@ -216,39 +201,80 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*types.ReplicaS
 	return nil, fmt.Errorf("check many times but not ready: %v", err)
 }
 
-func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
-	latestBlockNumber := blockNotice.NewBlocks[len(blockNotice.NewBlocks)-1].BlockNumber
-	replicaStateChange, err := c.checkWithReTry(latestBlockNumber)
+func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
+	// 如果副本高度大于kafka最新高度，直接返回(一致性节点后上线)
+	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber {
+		return true
+	}
+
+	replicaStateChange, err := c.checkWithReTry(kafkaLatestBlockNumber)
 	if err != nil {
 		log.Printf("check error %+v", err)
 		return false
 	}
+	if replicaStateChange.LatestBlockNumber != nil {
+		c.ReplicaLatestBlockNumber = uint64(replicaStateChange.LatestBlockNumber.ToInt().Int64())
+	}
 	if replicaStateChange != nil {
-		err = WriteReplicaStateChange(c.innerReplicaStateChangeWriter, replicaStateChange)
+		err = util.WriteReplicaStateChange(c.innerReplicaStateChangeWriter, replicaStateChange)
 		if err != nil {
+			log.Printf("write replica state change error %+v", err)
 			return false
 		}
 	}
+	return true
+}
 
-	err = c.remote_drop_blocks(blockNotice)
+func (c *Checker) reWriteForkBlock(dropBlocks []types.BlockContext) bool {
+	// 对于fork block，重写is_fork=true
+	err := c.rewriteDropBlocks(dropBlocks)
 	if err != nil {
 		log.Printf("remote drop blocks error %+v", err)
 		return false
 	}
 
-	validationHashes, err := c.getValidationHashMany(blockNotice)
+	return true
+}
+
+func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
+	validationHashes, err := c.getValidationHashMany(newBlocks)
 	if err != nil {
 		log.Printf("get validation hash error %+v", err)
 		return false
 	}
 
-	err = db.DB.WriteBlockInfos(blockNotice, validationHashes)
+	err = db.DB.WriteBlockInfos(newBlocks, validationHashes)
 	if err != nil {
 		log.Printf("write block info error %+v", err)
 		return false
 	}
+	return true
+}
 
-	err = WriteBlockNotice(c.outerNewBlockWriter, blockNotice)
+func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
+	// kafka最新高度
+	kafkaLatestBlockNumber := blockNotice.NewBlocks[len(blockNotice.NewBlocks)-1].BlockNumber
+
+	// 1. 一致性check，返回已就绪节点的最低高度
+	if !c.checkAndNotify(kafkaLatestBlockNumber) {
+		log.Printf("check and notify error")
+		return false
+	}
+
+	// 2. 重写fork block
+	if !c.reWriteForkBlock(blockNotice.DropBlocks) {
+		log.Printf("rewrite fork block error")
+		return false
+	}
+
+	// 3. 写入db
+	if !c.writeBlockInfoToDB(blockNotice.NewBlocks) {
+		log.Printf("write block info to db error")
+		return false
+	}
+
+	// 4. 发送新块通知
+	err := util.WriteBlockNotice(c.outerNewBlockWriter, blockNotice)
 	return err == nil
 }
 
@@ -296,34 +322,4 @@ func (c *Checker) Run() {
 shutdown:
 	c.innerNewBlockReader.Close()
 	c.outerNewBlockWriter.Close()
-}
-
-func WriteReplicaStateChange(writer *kafka.Writer, replicaStateChange *types.ReplicaStateChangeNotification) error {
-	value, err := util.EncodeToJsonGzip(replicaStateChange)
-	if err != nil {
-		return err
-	}
-	err = writer.WriteMessages(context.Background(), kafka.Message{
-		Key:   []byte("ReplicaStateChange"),
-		Value: value,
-	})
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func WriteBlockNotice(writer *kafka.Writer, blockNotice *types.BlockChangeNotification) error {
-	value, err := util.EncodeToJsonGzip(blockNotice)
-	if err != nil {
-		return err
-	}
-	err = writer.WriteMessages(context.Background(), kafka.Message{
-		Key:   []byte("NewBlock"),
-		Value: value,
-	})
-	if err != nil {
-		return err
-	}
-	return nil
 }

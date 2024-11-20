@@ -102,9 +102,9 @@ func (cdb *ConsistencyDB) getBlockHashByNum(num *big.Int) (common.Hash, error) {
 	return common.BytesToHash(data), nil
 }
 
-func (cdb *ConsistencyDB) WriteBlockInfos(blockInfos *types.BlockChangeNotification, validationHashes []int64) error {
+func (cdb *ConsistencyDB) WriteBlockInfos(newBlocks []types.BlockContext, validationHashes []int64) error {
 	batch := cdb.db.NewBatch()
-	for i, block := range blockInfos.NewBlocks {
+	for i, block := range newBlocks {
 		bi := BlockInfoRlp{
 			Num:            new(big.Int).SetUint64(block.BlockNumber),
 			ValidationHash: big.NewInt(validationHashes[i]),
