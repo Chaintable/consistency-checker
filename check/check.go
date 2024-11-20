@@ -55,7 +55,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 	}
 
 	return &Checker{
-		innerNewBlockReader:           util.NewKafkaReader(config.InnerBrokers, config.InnerReplicaStateChangeTopic, config.InnerNewBlockGroupID),
+		innerNewBlockReader:           util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
 		innerReplicaStateChangeWriter: util.NewKafkaWriter(config.InnerBrokers, config.InnerReplicaStateChangeTopic),
 		outerS3Reader:                 innerS3Reader,
 		outerNewBlockWriter:           util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),

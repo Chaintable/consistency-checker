@@ -18,6 +18,7 @@ type Config struct {
 	OuterS3Region                string   `yaml:"outer_s3_region"`           // 业务S3的region
 	InnerBrokers                 []string `yaml:"inner_brokers"`             // 内部kafka的brokers
 	InnerReplicaStateChangeTopic string   `yaml:"inner_replica_state_topic"` // 内部kafka的topic
+	InnerNewBlockTopic           string   `yaml:"inner_new_block_topic"`     // 内部kafka的topic
 	InnerNewBlockGroupID         string   `yaml:"inner_new_block_group_id"`  // 内部kafka的group id
 	OuterBrokers                 []string `yaml:"outer_brokers"`             // 业务kafka的brokers
 	OuterNewBlockTopic           string   `yaml:"outer_new_block_topic"`     // 业务kafka的topic
