@@ -1,16 +1,15 @@
-listen: "0.0.0.0:8881"                # Default listening address
-ready_ratio: 0.8                      # Default readiness ratio
-check_interval_ms: 20                 # Default interval for checks in milliseconds
-chain_id: 1                           # Default Chain ID (e.g., Ethereum Mainnet)
-consistency_db_path: "db"   # Default path for consistency database
-outer_s3_bucket: "inner-bucket-name"  # Default inner S3 bucket name
-outer_s3_region: "us-west-2"          # Default inner S3 region
-inner_brokers:                        # Default list of inner brokers
-  - "broker1.internal:9092"
-  - "broker2.internal:9092"
-inner_replica_state_topic: "replica-state"  # Default topic for inner replica state changes
-inner_new_block_group_id: "block-group-1"   # Default group ID for new blocks in inner system
-outer_brokers:                        # Default list of outer brokers
-  - "broker1.external:9092"
-  - "broker2.external:9092"
-outer_new_block_topic: "new-blocks"   # Default topic for outer new blocks
+listen: "0.0.0.0:8881"                                            # Default listening address
+ready_ratio: 0.8                                                  # Default readiness ratio
+check_num: 3                                                      # Default number of checks
+check_interval_ms: 20                                             # Default interval for checks in milliseconds
+chain_id: "eth"                                                   # Default Chain ID (e.g., eth)
+consistency_db_path: "/data/eth/consistency_db"                   # Default path for consistency database
+outer_s3_bucket: "chaintable-nodex-pipeline-test"                 # Default inner S3 bucket name
+outer_s3_region: "ap-northeast-1"                                 # Default inner S3 region
+inner_brokers:                                                    # Default list of inner brokers
+  - "b-1.chaintablenodexpi.pz2h9z.c4.kafka.ap-northeast-1.amazonaws.com:9092"
+inner_replica_state_topic: "replica-state"                        # Default topic for inner replica state changes
+inner_new_block_group_id: "consistency-group"                     # Default group ID for new blocks in inner system
+outer_brokers:                                                    # Default list of outer brokers
+  - "b-1.chaintablenodexpi.pz2h9z.c4.kafka.ap-northeast-1.amazonaws.com:9092"
+outer_new_block_topic: "pipeline_test"                            # Default topic for outer new blocks
