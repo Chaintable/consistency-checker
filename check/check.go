@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"time"
 
 	"log"
@@ -71,7 +72,7 @@ func (c *Checker) Close() {
 }
 
 func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error) {
-	s3Key := fmt.Sprintf("%s/%d/%s", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	s3Key := fmt.Sprintf("%d/%d/%s", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
 	obj, err := c.outerS3Reader.GetObject(
 		context.Background(),
 		&s3.GetObjectInput{
@@ -120,7 +121,7 @@ func (c *Checker) getValidationHashMany(newBlocks []types.BlockContext) ([]int64
 }
 
 func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, blockValidation int64) error {
-	s3Key := fmt.Sprintf("%s/%d/%s", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	s3Key := fmt.Sprintf("%d/%d/%s", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
 	validation := types.BlockValidation{
 		ValidationHash: blockValidation,
 		IsFork:         true,
@@ -261,8 +262,13 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 		return false
 	}
 
+	dropBlocks := blockNotice.DropBlocks
+	slices.Reverse(dropBlocks)
+
+	newBlocks := blockNotice.NewBlocks
+
 	// 2. 重写fork block
-	if !c.reWriteForkBlock(blockNotice.DropBlocks) {
+	if !c.reWriteForkBlock(dropBlocks) {
 		log.Printf("rewrite fork block error")
 		return false
 	}
@@ -273,9 +279,52 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 		return false
 	}
 
-	// 4. 发送新块通知
-	err := util.WriteBlockNotice(c.outerNewBlockWriter, blockNotice)
-	return err == nil
+	// 4. 发送drop block通知
+	if !c.WriteDropBlockNotice(dropBlocks) {
+		log.Printf("write drop block notice error")
+		return false
+	}
+
+	// 5. 发送新块通知
+	if !c.WriteNewBlockNotice(newBlocks) {
+		log.Printf("write new block notice error")
+		return false
+	}
+	return true
+}
+
+func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
+	for _, block := range dropBlocks {
+		b := &types.OuterBlockChangeNotification{
+			BlockNumber: block.BlockNumber,
+			Hash:        block.Hash,
+			ChainID:     c.confg.ChainID,
+			IsFork:      true,
+		}
+		err := util.WriteOuterBlockNotice(c.outerNewBlockWriter, b)
+		if err != nil {
+			log.Printf("write drop block notice error %+v", err)
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
+	for _, block := range newBlocks {
+		b := &types.OuterBlockChangeNotification{
+			BlockNumber: block.BlockNumber,
+			Hash:        block.Hash,
+			ChainID:     c.confg.ChainID,
+			IsFork:      false,
+		}
+		err := util.WriteOuterBlockNotice(c.outerNewBlockWriter, b)
+		if err != nil {
+			log.Printf("write new block notice error %+v", err)
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Checker) Run() {
