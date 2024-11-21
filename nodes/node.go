@@ -85,7 +85,6 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 		log.Printf("eth_blockNumber returns invalid block number: %v\n", rsp.Result)
 		return 0, fmt.Errorf("eth_blockNumber returns invalid block number: %v", rsp.Result)
 	}
-	log.Printf("eth_blockNumber returns block number: %v\n", blockNumStr)
 	blockNum, err := strconv.ParseInt(blockNumStr, 0, 64)
 	if err != nil {
 		log.Printf("eth_blockNumber returns invalid block number: %v\n", blockNumStr)
