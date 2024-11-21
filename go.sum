@@ -1,5 +1,5 @@
-github.com/Chaintable/pipeline v0.0.18 h1:H7YL9sJvp1AUkhZewJikEx+zRMaNGCym3+11Bk9Ji9A=
-github.com/Chaintable/pipeline v0.0.18/go.mod h1:BI5FofeVTDOfoqss+mjs2mA/GtSOtt3A3otbUxnSe10=
+github.com/Chaintable/pipeline v0.0.19 h1:ug4Iq/uc82nJMauUfPAMEGwI0GeCPJyUA47uL9OSQCI=
+github.com/Chaintable/pipeline v0.0.19/go.mod h1:BI5FofeVTDOfoqss+mjs2mA/GtSOtt3A3otbUxnSe10=
 github.com/DataDog/zstd v1.5.6 h1:LbEglqepa/ipmmQJUDnSsfvA8e8IStVcGaFWDuxvGOY=
 github.com/DataDog/zstd v1.5.6/go.mod h1:g4AWEaM3yOg3HYfnJ3YIawPnVdXJh9QME85blwSAmyw=
 github.com/StackExchange/wmi v1.2.1 h1:VIkavFPXSjcnS+O8yTq7NI32k0R5Aj+v39y29VYDOSA=

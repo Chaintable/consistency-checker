@@ -12,7 +12,7 @@ type Config struct {
 	ReadyRatio                   float64  `yaml:"ready_ratio"`               // 副本节点准备好的比例，达到后推送kafka
 	CheckNum                     int      `yaml:"check_num"`                 // 每次得知block更新后，check副本节点的次数
 	CheckInterval                int      `yaml:"check_interval_ms"`         // 每次checkk副本节点的间隔
-	ChainID                      string   `yaml:"chain_id"`                  // 链ID
+	ChainID                      int64    `yaml:"chain_id"`                  // 链ID
 	ConsistencyDBPath            string   `yaml:"consistency_db_path"`       // 一致性检查的数据库路径
 	OuterS3Bucket                string   `yaml:"outer_s3_bucket"`           // 业务S3的bucket
 	OuterS3Region                string   `yaml:"outer_s3_region"`           // 业务S3的region
