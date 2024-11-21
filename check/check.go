@@ -34,14 +34,6 @@ type Checker struct {
 	quit                     chan struct{}
 }
 
-func NewKafkaReader(brokers []string, topic string, groupID string) *kafka.Reader {
-	return kafka.NewReader(kafka.ReaderConfig{
-		Brokers: brokers,
-		Topic:   topic,
-		GroupID: groupID,
-	})
-}
-
 func NewChecker(config *config.Config) (*Checker, error) {
 	err := db.OpenConsistencyDB(config.ConsistencyDBPath)
 	if err != nil {
@@ -299,6 +291,7 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 			BlockNumber: block.BlockNumber,
 			Hash:        block.Hash,
 			ChainID:     c.confg.ChainID,
+			Timestamp:   block.Timestamp,
 			IsFork:      true,
 		}
 		err := util.WriteOuterBlockNotice(c.outerNewBlockWriter, b)
@@ -316,6 +309,7 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 			BlockNumber: block.BlockNumber,
 			Hash:        block.Hash,
 			ChainID:     c.confg.ChainID,
+			Timestamp:   block.Timestamp,
 			IsFork:      false,
 		}
 		err := util.WriteOuterBlockNotice(c.outerNewBlockWriter, b)
