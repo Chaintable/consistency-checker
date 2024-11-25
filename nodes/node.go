@@ -16,13 +16,11 @@ import (
 )
 
 type Node struct {
-	Url  string
-	Meta string
+	Meta string `json:"meta"`
 }
 
-func NewNode(url string, meta string) *Node {
+func NewNode(meta string) *Node {
 	return &Node{
-		Url:  url,
 		Meta: meta,
 	}
 }
@@ -59,7 +57,7 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 		return 0, err
 	}
 
-	req, _ := http.NewRequest("POST", node.Url, bytes.NewReader(reqBodyBytes))
+	req, _ := http.NewRequest("POST", node.Meta, bytes.NewReader(reqBodyBytes))
 	req.Header.Add("accept", "application/json")
 	req.Header.Add("content-type", "application/json")
 

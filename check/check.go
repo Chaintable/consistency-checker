@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/segmentio/kafka-go"
+	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/Chaintable/consistency_checker/config"
 	"github.com/Chaintable/consistency_checker/db"
@@ -28,6 +29,7 @@ type Checker struct {
 	innerReplicaStateChangeWriter *kafka.Writer
 	outerNewBlockWriter           *kafka.Writer
 	outerS3Reader                 *s3.Client
+	etcdClient                    *clientv3.Client
 	confg                         *config.Config
 	// 副本80%高度
 	ReplicaLatestBlockNumber uint64
@@ -47,11 +49,27 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
+	etcdClient, err := clientv3.New(clientv3.Config{
+		Endpoints:   config.EtcdEndpoints,
+		DialTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		log.Printf("create etcd client error %+v", err)
+		return nil, err
+	}
+
+	err = nodes.InitFromEtcd(config.ChainID, etcdClient)
+	if err != nil {
+		log.Printf("init from etcd error %+v", err)
+		return nil, err
+	}
+
 	return &Checker{
 		innerNewBlockReader:           util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
 		innerReplicaStateChangeWriter: util.NewKafkaWriter(config.InnerBrokers, config.InnerReplicaStateChangeTopic),
 		outerS3Reader:                 innerS3Reader,
 		outerNewBlockWriter:           util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
+		etcdClient:                    etcdClient,
 		confg:                         config,
 		quit:                          make(chan struct{}),
 	}, nil
@@ -218,6 +236,19 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	return true
 }
 
+func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replicaStateChange *types.ReplicaStateChangeNotification) error {
+	value, err := util.EncodeToJsonGzip(replicaStateChange)
+	if err != nil {
+		return err
+	}
+	prefix := fmt.Sprintf("replicaState/%d/available_nodes", c.confg.ChainID)
+	_, err = writer.Put(context.Background(), prefix, string(value))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Checker) reWriteForkBlock(dropBlocks []types.BlockContext) bool {
 	// 对于fork block，重写is_fork=true
 	err := c.rewriteDropBlocks(dropBlocks)
@@ -368,4 +399,5 @@ func (c *Checker) Run() {
 shutdown:
 	c.innerNewBlockReader.Close()
 	c.outerNewBlockWriter.Close()
+	c.etcdClient.Close()
 }

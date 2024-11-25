@@ -1,9 +1,13 @@
 package nodes
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/Chaintable/pipeline/types"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 var (
@@ -21,6 +25,42 @@ func NewRWMap() *RWMap {
 	return &RWMap{
 		m: make(map[string]Node),
 	}
+}
+
+func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
+	prefix := fmt.Sprintf("replicaState/%d/", chainID)
+	resp, err := cli.Get(context.TODO(), prefix, clientv3.WithPrefix())
+	if err != nil {
+		return err
+	}
+	for _, kv := range resp.Kvs {
+		var node Node
+		if err := json.Unmarshal(kv.Value, &node); err != nil {
+			return err
+		}
+		NodeMap.SetByIP(node.Meta, node)
+	}
+
+	lastRev := resp.Header.Revision
+
+	go func() {
+		rch := cli.Watch(context.Background(), prefix, clientv3.WithPrefix(), clientv3.WithRev(lastRev+1))
+		for wresp := range rch {
+			for _, ev := range wresp.Events {
+				var node Node
+				if err := json.Unmarshal(ev.Kv.Value, &node); err != nil {
+					continue
+				}
+				switch ev.Type {
+				case clientv3.EventTypePut:
+					NodeMap.SetByIP(node.Meta, node)
+				case clientv3.EventTypeDelete:
+					NodeMap.DeleteByIP(node.Meta)
+				}
+			}
+		}
+	}()
+	return nil
 }
 
 func (m *RWMap) GetByIP(ip string) Node {

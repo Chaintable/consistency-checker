@@ -22,6 +22,7 @@ type Config struct {
 	InnerNewBlockGroupID         string   `yaml:"inner_new_block_group_id"`  // 内部kafka的group id
 	OuterBrokers                 []string `yaml:"outer_brokers"`             // 业务kafka的brokers
 	OuterNewBlockTopic           string   `yaml:"outer_new_block_topic"`     // 业务kafka的topic
+	EtcdEndpoints                []string `yaml:"etcd_endpoints"`            // etcd的endpoints
 }
 
 var defaultConfig = Config{
