@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Chaintable/pipeline/types"
@@ -57,7 +58,15 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 		return 0, err
 	}
 
-	req, _ := http.NewRequest("POST", node.Meta, bytes.NewReader(reqBodyBytes))
+	url := node.Meta
+	if !strings.HasPrefix(url, "http://") {
+		url = "http://" + url
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(reqBodyBytes))
+	if err != nil {
+		return 0, err
+	}
 	req.Header.Add("accept", "application/json")
 	req.Header.Add("content-type", "application/json")
 

@@ -2,8 +2,8 @@ package nodes
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/Chaintable/pipeline/types"
@@ -28,15 +28,18 @@ func NewRWMap() *RWMap {
 }
 
 func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
-	prefix := fmt.Sprintf("replicaState/%d/", chainID)
+	prefix := fmt.Sprintf("replicaState/%d/node/", chainID)
 	resp, err := cli.Get(context.TODO(), prefix, clientv3.WithPrefix())
 	if err != nil {
 		return err
 	}
 	for _, kv := range resp.Kvs {
-		var node Node
-		if err := json.Unmarshal(kv.Value, &node); err != nil {
-			return err
+		if len(kv.Value) == 0 {
+			log.Printf("InitFromEtcd: empty value for key %s\n", string(kv.Key))
+			continue
+		}
+		node := Node{
+			Meta: string(kv.Value),
 		}
 		NodeMap.SetByIP(node.Meta, node)
 	}
@@ -48,8 +51,12 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 		for wresp := range rch {
 			for _, ev := range wresp.Events {
 				var node Node
-				if err := json.Unmarshal(ev.Kv.Value, &node); err != nil {
+				if len(ev.Kv.Value) == 0 {
+					log.Printf("InitFromEtcd: empty value for key %s\n", string(ev.Kv.Key))
 					continue
+				}
+				node = Node{
+					Meta: string(ev.Kv.Value),
 				}
 				switch ev.Type {
 				case clientv3.EventTypePut:
@@ -70,6 +77,7 @@ func (m *RWMap) GetByIP(ip string) Node {
 }
 
 func (m *RWMap) SetByIP(ip string, node Node) {
+	log.Printf("InitFromEtcd add node: %s\n", node.Meta)
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	m.m[ip] = node

@@ -14,4 +14,7 @@ inner_new_block_group_id: "consistency-group-test"                # Default grou
 outer_brokers:                                                    # Default list of outer brokers
   - "b-1.chaintablenodexpi.pz2h9z.c4.kafka.ap-northeast-1.amazonaws.com:9092"
 outer_new_block_topic: "pipeline_test"                            # Default topic for outer new blocks
-etcd_endpoints: ["127.0.0.1:2479","127.0.0.1:2579","127.0.0.1:2379"]
+etcd_endpoints: 
+  - "127.0.0.1:2479"
+  - "127.0.0.1:2579"
+  - "127.0.0.1:2379"

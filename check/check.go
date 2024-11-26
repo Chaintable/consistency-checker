@@ -108,9 +108,8 @@ func (c *Checker) getValidationHashWithReTry(blockCtx *types.BlockContext) (int6
 	for i := 0; i < 3; i++ {
 		validationHash, err := c.getValidationHash(blockCtx)
 		if err != nil {
-			return 0, err
-		}
-		if validationHash != 0 {
+			log.Printf("get validation hash error %+v", err)
+		} else {
 			return validationHash, nil
 		}
 		time.Sleep(1 * time.Second)
@@ -227,7 +226,7 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 		log.Printf("ReplicaLatestBlockNumber %d", c.ReplicaLatestBlockNumber)
 	}
 	if replicaStateChange != nil {
-		err = util.WriteReplicaStateChange(c.innerReplicaStateChangeWriter, replicaStateChange)
+		err = c.WriteReplicaStateChangeToEtcd(c.etcdClient, replicaStateChange)
 		if err != nil {
 			log.Printf("write replica state change error %+v", err)
 			return false
@@ -263,7 +262,7 @@ func (c *Checker) reWriteForkBlock(dropBlocks []types.BlockContext) bool {
 func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
 	validationHashes, err := c.getValidationHashMany(newBlocks)
 	if err != nil {
-		log.Printf("get validation hash error %+v", err)
+		log.Printf("get validation hash error %+v\n", err)
 		return false
 	}
 
