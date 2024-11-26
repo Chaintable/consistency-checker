@@ -101,7 +101,6 @@ func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	log.Printf("get s3key %s, validation hash %d", s3Key, validation.ValidationHash)
 	return validation.ValidationHash, nil
 }
 
@@ -109,9 +108,8 @@ func (c *Checker) getValidationHashWithReTry(blockCtx *types.BlockContext) (int6
 	for i := 0; i < 3; i++ {
 		validationHash, err := c.getValidationHash(blockCtx)
 		if err != nil {
-			return 0, err
-		}
-		if validationHash != 0 {
+			log.Printf("get validation hash error %+v", err)
+		} else {
 			return validationHash, nil
 		}
 		time.Sleep(1 * time.Second)
