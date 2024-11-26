@@ -226,7 +226,7 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 		log.Printf("ReplicaLatestBlockNumber %d", c.ReplicaLatestBlockNumber)
 	}
 	if replicaStateChange != nil {
-		err = util.WriteReplicaStateChange(c.innerReplicaStateChangeWriter, replicaStateChange)
+		err = c.WriteReplicaStateChangeToEtcd(c.etcdClient, replicaStateChange)
 		if err != nil {
 			log.Printf("write replica state change error %+v", err)
 			return false
