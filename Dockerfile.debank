@@ -12,7 +12,7 @@ RUN go build -o checker cmd/checker/*.go
 
 FROM ubuntu:23.04
 
-RUN apt-get update && apt-get install -y ca-certificates wget libsnappy-dev libjemalloc-dev
+RUN apt update && apt install -y ca-certificates wget
 RUN update-ca-certificates
 
 WORKDIR /app
