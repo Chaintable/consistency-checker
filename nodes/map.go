@@ -2,8 +2,8 @@ package nodes
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/Chaintable/pipeline/types"
@@ -28,18 +28,19 @@ func NewRWMap() *RWMap {
 }
 
 func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
-	prefix := fmt.Sprintf("replicaState/%d/", chainID)
+	prefix := fmt.Sprintf("replicaState/%d/node/", chainID)
 	resp, err := cli.Get(context.TODO(), prefix, clientv3.WithPrefix())
 	if err != nil {
 		return err
 	}
 	for _, kv := range resp.Kvs {
-		var node Node
-		if err := json.Unmarshal(kv.Value, &node); err != nil {
-			return err
+		node := Node{
+			Meta: string(kv.Value),
 		}
 		NodeMap.SetByIP(node.Meta, node)
 	}
+
+	log.Printf("Init nodes from etcd, count: %d, %v", len(NodeMap.m), NodeMap.GetAll())
 
 	lastRev := resp.Header.Revision
 
@@ -47,9 +48,11 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 		rch := cli.Watch(context.Background(), prefix, clientv3.WithPrefix(), clientv3.WithRev(lastRev+1))
 		for wresp := range rch {
 			for _, ev := range wresp.Events {
-				var node Node
-				if err := json.Unmarshal(ev.Kv.Value, &node); err != nil {
+				if len(ev.Kv.Value) == 0 {
 					continue
+				}
+				node := Node{
+					Meta: string(ev.Kv.Value),
 				}
 				switch ev.Type {
 				case clientv3.EventTypePut:
