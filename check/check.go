@@ -101,6 +101,7 @@ func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error)
 	if err != nil {
 		return 0, err
 	}
+	log.Printf("get s3key %s, validation hash %d", s3Key, validation.ValidationHash)
 	return validation.ValidationHash, nil
 }
 
@@ -263,7 +264,7 @@ func (c *Checker) reWriteForkBlock(dropBlocks []types.BlockContext) bool {
 func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
 	validationHashes, err := c.getValidationHashMany(newBlocks)
 	if err != nil {
-		log.Printf("get validation hash error %+v", err)
+		log.Printf("get validation hash error %+v\n", err)
 		return false
 	}
 
