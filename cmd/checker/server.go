@@ -70,7 +70,7 @@ func handleRegisterNode(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "url is required"})
 	}
 	nodes.NodeMap.SetByIP(req.Meta, nodes.Node{
-		Meta: req.Meta,
+		IP: req.Meta,
 	})
 	log.Printf("Register node: %+v\n", nodes.NodeMap.GetAll())
 	c.JSON(200, gin.H{"status": "ok"})

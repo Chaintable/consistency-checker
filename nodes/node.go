@@ -17,12 +17,12 @@ import (
 )
 
 type Node struct {
-	Meta string `json:"meta"`
+	IP string `json:"ip"`
 }
 
-func NewNode(meta string) *Node {
+func NewNode(ip string) *Node {
 	return &Node{
-		Meta: meta,
+		IP: ip,
 	}
 }
 
@@ -58,7 +58,7 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 		return 0, err
 	}
 
-	url := node.Meta
+	url := node.IP
 	if !strings.HasPrefix(url, "http://") {
 		url = "http://" + url
 	}
@@ -106,19 +106,19 @@ func (node *Node) Check(kafkaLatestBlockNumber uint64) types.ReplicaState {
 		return types.ReplicaState{
 			LatestBlockNumber: nil,
 			StateType:         3,
-			Meta:              node.Meta,
+			IP:                node.IP,
 		}
 	}
 	if latestBlockNumber >= kafkaLatestBlockNumber {
 		return types.ReplicaState{
 			LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
 			StateType:         1,
-			Meta:              node.Meta,
+			IP:                node.IP,
 		}
 	}
 	return types.ReplicaState{
 		LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
 		StateType:         2,
-		Meta:              node.Meta,
+		IP:                node.IP,
 	}
 }
