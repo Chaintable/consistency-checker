@@ -57,7 +57,7 @@ func handleEthGetBlockInfoByHash(c *gin.Context) {
 }
 
 type NodeRegisterReq struct {
-	Meta string `json:"meta"`
+	IP string `json:"ip"`
 }
 
 func handleRegisterNode(c *gin.Context) {
@@ -66,11 +66,11 @@ func handleRegisterNode(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Meta == "" {
+	if req.IP == "" {
 		c.JSON(400, gin.H{"error": "url is required"})
 	}
-	nodes.NodeMap.SetByIP(req.Meta, nodes.Node{
-		IP: req.Meta,
+	nodes.NodeMap.SetByIP(req.IP, nodes.Node{
+		IP: req.IP,
 	})
 	log.Printf("Register node: %+v\n", nodes.NodeMap.GetAll())
 	c.JSON(200, gin.H{"status": "ok"})
