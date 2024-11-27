@@ -11,6 +11,8 @@ import (
 
 	"log"
 
+	"encoding/json"
+
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/segmentio/kafka-go"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -236,7 +238,7 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 }
 
 func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replicaStateChange *types.ReplicaStateChangeNotification) error {
-	value, err := util.EncodeToJsonGzip(replicaStateChange)
+	value, err := json.Marshal(replicaStateChange)
 	if err != nil {
 		return err
 	}
