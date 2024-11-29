@@ -1,97 +1,146 @@
 package main
 
 import (
-	"log"
+	"encoding/json"
+	"io"
 	"math/big"
 
-	"github.com/Chaintable/consistency_checker/config"
 	"github.com/Chaintable/consistency_checker/db"
 	"github.com/Chaintable/consistency_checker/nodes"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 )
 
-func handleEthGetBlockInfoByNum(c *gin.Context) {
-	req := c.Param("num")
+func handleGetLatestBlock(c *gin.Context) {
+	if db.DB == nil {
+		c.JSON(-39005, gin.H{"error": "db not initialized"})
+		return
+	}
 
-	// Parse request
-	reqNum := new(big.Int)
-	reqNum, ok := reqNum.SetString(req, 10)
+	latestBlock, err := db.DB.GetLatestBlockInfo()
+	if err != nil {
+		c.JSON(-39005, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, latestBlock)
+}
+
+func handleGetBlockByHeight(c *gin.Context, req *nodes.JsonRpcReq) {
+	if len(req.Params) == 0 {
+		c.IndentedJSON(-32602, "params not found")
+		return
+	}
+	height := req.Params[0].(string)
+	if height == "" {
+		c.IndentedJSON(-32602, "params not found")
+		return
+	}
+
+	num := new(big.Int)
+	num, ok := num.SetString(height, 10)
 	if !ok {
-		c.JSON(400, gin.H{"error": "invalid number"})
+		c.IndentedJSON(-32602, "params error")
 		return
 	}
 
-	log.Printf("Request block number: %s\n", reqNum.String())
+	if db.DB == nil {
+		c.JSON(-39005, gin.H{"error": "db not initialized"})
+		return
+	}
 
-	// Get block info by number
-	block, err := db.DB.GetBlockInfoByNum(reqNum)
+	block, err := db.DB.GetBlockInfoByNum(num)
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		c.IndentedJSON(-39005, err.Error())
 		return
 	}
-
-	c.JSON(200, block)
+	c.IndentedJSON(200, block)
 }
 
-func handleEthGetBlockInfoByHash(c *gin.Context) {
-	req := c.Param("id")
-	if len(req) != 66 {
-		c.JSON(400, gin.H{"error": "invalid hash"})
+func handleGetBlockById(c *gin.Context, req *nodes.JsonRpcReq) {
+	if len(req.Params) == 0 {
+		c.IndentedJSON(-32602, "params not found")
+		return
+	}
+	hash := req.Params[0].(string)
+	if hash == "" {
+		c.IndentedJSON(-32602, "params not found")
 		return
 	}
 
-	// Parse request
-	hash := common.HexToHash(req)
+	if db.DB == nil {
+		c.JSON(-39005, gin.H{"error": "db not initialized"})
+		return
+	}
 
-	log.Printf("Request block hash: %s\n", hash.String())
-
-	// Get block info by hash
-	block, err := db.DB.GetBlockInfoByHash(hash)
+	block, err := db.DB.GetBlockInfoByHash(common.HexToHash(hash))
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		c.IndentedJSON(-39005, err.Error())
+		return
+	}
+	c.IndentedJSON(200, block)
+}
+
+func handleBlockIsValid(c *gin.Context, req *nodes.JsonRpcReq) {
+	if len(req.Params) == 0 {
+		c.IndentedJSON(-32602, "params not found")
+		return
+	}
+	hash := req.Params[0].(string)
+	if hash == "" {
+		c.IndentedJSON(-32602, "params not found")
 		return
 	}
 
-	c.JSON(200, block)
-}
-
-type NodeRegisterReq struct {
-	Address string `json:"address"`
-}
-
-func handleRegisterNode(c *gin.Context) {
-	req := NodeRegisterReq{}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
+	if db.DB == nil {
+		c.JSON(-39005, gin.H{"error": "db not initialized"})
 		return
 	}
-	if req.Address == "" {
-		c.JSON(400, gin.H{"error": "url is required"})
-	}
-	nodes.NodeMap.SetByIP(req.Address, nodes.Node{
-		Address: req.Address,
-	})
-	log.Printf("Register node: %+v\n", nodes.NodeMap.GetAll())
-	c.JSON(200, gin.H{"status": "ok"})
-}
 
-type NodeUnRegisterReq struct {
-	Url string `json:"url"`
-}
-
-func handleUnregisterNode(c *gin.Context) {
-	req := NodeUnRegisterReq{}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
+	block0, err := db.DB.GetBlockInfoByHash(common.HexToHash(hash))
+	if err != nil {
+		c.IndentedJSON(-39005, err.Error())
 		return
 	}
-	nodes.NodeMap.DeleteByIP(req.Url)
-	log.Printf("Register node: %+v\n", nodes.NodeMap.GetAll())
-	c.JSON(200, gin.H{"status": "ok"})
+
+	block1, err := db.DB.GetBlockInfoByNum(big.NewInt(0).SetUint64(block0.Height))
+	if err != nil {
+		c.IndentedJSON(-39005, err.Error())
+		return
+	}
+	c.IndentedJSON(200, block0.ID == block1.ID)
 }
 
-func startHTTPServer(config *config.Config) {
+func index(c *gin.Context) {
+	req := &nodes.JsonRpcReq{}
+	bodyBytes, _ := io.ReadAll(c.Request.Body)
+	if err := json.Unmarshal(bodyBytes, req); err != nil {
+		c.IndentedJSON(-32700, "request body invalid json")
+		return
+	}
+	if req.JsonRpc != "2.0" {
+		c.IndentedJSON(-32600, "jsonrpc version not supported")
+		return
+	}
+	if req.Method == "" {
+		c.IndentedJSON(-32601, "method not found")
+		return
+	}
+	switch req.Method {
+	case "getLatestBlock":
+		handleGetLatestBlock(c)
+	case "getBlockByHeight":
+		handleGetBlockByHeight(c, req)
+	case "getBlockById":
+		handleGetBlockById(c, req)
+	case "blockIsValid":
+		handleBlockIsValid(c, req)
+	default:
+		c.IndentedJSON(-32601, "method not found")
+	}
+}
+
+func startHTTPServer(listen string) {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(
@@ -99,12 +148,9 @@ func startHTTPServer(config *config.Config) {
 	)
 
 	// retrace handlers
-	router.Any("/block_info_by_num/:num", handleEthGetBlockInfoByNum)
-	router.Any("/block_info_by_id/:id", handleEthGetBlockInfoByHash)
-	router.Any("/register_node", handleRegisterNode)
-	router.Any("/unregister_node", handleUnregisterNode)
+	router.Any("/", index)
 
 	go func() {
-		router.Run(config.Listen)
+		router.Run(listen)
 	}()
 }
