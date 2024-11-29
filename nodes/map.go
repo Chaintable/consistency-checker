@@ -39,9 +39,9 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 			continue
 		}
 		node := Node{
-			Meta: string(kv.Value),
+			Address: string(kv.Value),
 		}
-		NodeMap.SetByIP(node.Meta, node)
+		NodeMap.SetByIP(node.Address, node)
 	}
 
 	lastRev := resp.Header.Revision
@@ -56,13 +56,13 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 					continue
 				}
 				node = Node{
-					Meta: string(ev.Kv.Value),
+					Address: string(ev.Kv.Value),
 				}
 				switch ev.Type {
 				case clientv3.EventTypePut:
-					NodeMap.SetByIP(node.Meta, node)
+					NodeMap.SetByIP(node.Address, node)
 				case clientv3.EventTypeDelete:
-					NodeMap.DeleteByIP(node.Meta)
+					NodeMap.DeleteByIP(node.Address)
 				}
 			}
 		}
@@ -77,7 +77,7 @@ func (m *RWMap) GetByIP(ip string) Node {
 }
 
 func (m *RWMap) SetByIP(ip string, node Node) {
-	log.Printf("InitFromEtcd add node: %s\n", node.Meta)
+	log.Printf("InitFromEtcd add node: %s\n", node.Address)
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	m.m[ip] = node
