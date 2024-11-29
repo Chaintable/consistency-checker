@@ -47,7 +47,7 @@ func main() {
 		checker.Run()
 	}()
 
-	startHTTPServer(&config)
+	startHTTPServer(config.Listen)
 
 	sig := <-sigChan
 

@@ -2,6 +2,7 @@ package db
 
 import (
 	"math/big"
+	"sync"
 
 	"github.com/Chaintable/pipeline/types"
 	"github.com/cockroachdb/pebble"
@@ -33,8 +34,10 @@ type BlockInfo struct {
 }
 
 type ConsistencyDB struct {
-	DBDir string
-	db    *pebble.DB
+	DBDir  string
+	db     *pebble.DB
+	latest *BlockInfo
+	sync.RWMutex
 }
 
 func NewConsistencyDB(dbDir string) (*ConsistencyDB, error) {
@@ -59,6 +62,15 @@ func OpenConsistencyDB(dbDir string) error {
 
 func (cdb *ConsistencyDB) Close() error {
 	return cdb.db.Close()
+}
+
+func (cdb *ConsistencyDB) GetLatestBlockInfo() (*BlockInfo, error) {
+	cdb.RLock()
+	defer cdb.RUnlock()
+	if cdb.latest == nil {
+		return nil, nil
+	}
+	return cdb.latest, nil
 }
 
 func (cdb *ConsistencyDB) GetBlockInfoByHash(hash common.Hash) (*BlockInfo, error) {
@@ -122,5 +134,16 @@ func (cdb *ConsistencyDB) WriteBlockInfos(newBlocks []types.BlockContext, valida
 			return err
 		}
 	}
-	return batch.Commit(pebble.Sync)
+	err := batch.Commit(pebble.Sync)
+	if err != nil {
+		return err
+	}
+	cdb.Lock()
+	defer cdb.Unlock()
+	cdb.latest = &BlockInfo{
+		ID:             newBlocks[len(newBlocks)-1].Hash,
+		Height:         newBlocks[len(newBlocks)-1].BlockNumber,
+		ValidationHash: validationHashes[len(validationHashes)-1],
+	}
+	return nil
 }
