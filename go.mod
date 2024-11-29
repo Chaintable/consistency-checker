@@ -1,4 +1,4 @@
-module github.com/Chaintable/consistency_checker
+module github.com/Chaintable/consistency-checker
 
 go 1.22.5
 

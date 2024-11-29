@@ -5,8 +5,8 @@ import (
 	"io"
 	"math/big"
 
-	"github.com/Chaintable/consistency_checker/db"
-	"github.com/Chaintable/consistency_checker/nodes"
+	"github.com/Chaintable/consistency-checker/db"
+	"github.com/Chaintable/consistency-checker/nodes"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 )

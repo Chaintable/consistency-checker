@@ -7,8 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Chaintable/consistency_checker/check"
-	"github.com/Chaintable/consistency_checker/config"
+	"github.com/Chaintable/consistency-checker/check"
+	"github.com/Chaintable/consistency-checker/config"
 )
 
 func parseCmdlineAndLoadConfig() config.Config {
