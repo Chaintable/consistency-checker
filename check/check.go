@@ -17,9 +17,9 @@ import (
 	"github.com/segmentio/kafka-go"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/Chaintable/consistency_checker/config"
-	"github.com/Chaintable/consistency_checker/db"
-	"github.com/Chaintable/consistency_checker/nodes"
+	"github.com/Chaintable/consistency-checker/config"
+	"github.com/Chaintable/consistency-checker/db"
+	"github.com/Chaintable/consistency-checker/nodes"
 	"github.com/Chaintable/pipeline/types"
 	"github.com/Chaintable/pipeline/util"
 
