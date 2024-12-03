@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/Chaintable/pipeline/types"
@@ -50,19 +51,20 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 		rch := cli.Watch(context.Background(), prefix, clientv3.WithPrefix(), clientv3.WithRev(lastRev+1))
 		for wresp := range rch {
 			for _, ev := range wresp.Events {
-				var node Node
-				if len(ev.Kv.Value) == 0 {
-					log.Printf("InitFromEtcd: empty value for key %s\n", string(ev.Kv.Key))
-					continue
-				}
-				node = Node{
-					Address: string(ev.Kv.Value),
-				}
 				switch ev.Type {
 				case clientv3.EventTypePut:
+					if len(ev.Kv.Value) == 0 {
+						log.Printf("InitFromEtcd: empty value for key %s\n", string(ev.Kv.Key))
+						continue
+					}
+					node := Node{
+						Address: string(ev.Kv.Value),
+					}
 					NodeMap.SetByIP(node.Address, node)
 				case clientv3.EventTypeDelete:
-					NodeMap.DeleteByIP(node.Address)
+					address := string(ev.Kv.Key)
+					address = strings.TrimPrefix(address, prefix)
+					NodeMap.DeleteByIP(address)
 				}
 			}
 		}
@@ -77,13 +79,14 @@ func (m *RWMap) GetByIP(ip string) Node {
 }
 
 func (m *RWMap) SetByIP(ip string, node Node) {
-	log.Printf("InitFromEtcd add node: %s\n", node.Address)
+	log.Printf("add node: %s\n", node.Address)
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	m.m[ip] = node
 }
 
 func (m *RWMap) DeleteByIP(ip string) {
+	log.Printf("delete node: %s\n", ip)
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	delete(m.m, ip)
