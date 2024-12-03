@@ -32,7 +32,9 @@ type Checker struct {
 	outerNewBlockWriter           *kafka.Writer
 	outerS3Reader                 *s3.Client
 	etcdClient                    *clientv3.Client
+	leaseID                       clientv3.LeaseID
 	confg                         *config.Config
+	latestWriteEtcd               time.Time
 	// 副本80%高度
 	ReplicaLatestBlockNumber uint64
 	quit                     chan struct{}
@@ -66,6 +68,26 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
+	leaseIDResp, err := etcdClient.Grant(context.Background(), 5)
+	if err != nil {
+		log.Printf("grant etcd lease error %+v", err)
+		return nil, err
+	}
+	keepCh, err := etcdClient.KeepAlive(context.Background(), leaseIDResp.ID)
+	if err != nil {
+		log.Printf("keep alive err %+v", err)
+		return nil, err
+	}
+
+	go func() {
+		for ch := range keepCh {
+			if ch == nil {
+				log.Printf("keep alive error %+v", ch)
+				break
+			}
+		}
+	}()
+
 	return &Checker{
 		innerNewBlockReader:           util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
 		innerReplicaStateChangeWriter: util.NewKafkaWriter(config.InnerBrokers, config.InnerReplicaStateChangeTopic),
@@ -73,6 +95,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		outerNewBlockWriter:           util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
 		etcdClient:                    etcdClient,
 		confg:                         config,
+		leaseID:                       leaseIDResp.ID,
 		quit:                          make(chan struct{}),
 	}, nil
 }
@@ -214,7 +237,7 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*types.ReplicaS
 
 func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	// 如果副本高度大于kafka最新高度，直接返回(一致性节点后上线)
-	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber {
+	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber && time.Since(c.latestWriteEtcd) < 1*time.Second {
 		return true
 	}
 
@@ -243,10 +266,12 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 		return err
 	}
 	prefix := fmt.Sprintf("replicaState/%d/available_nodes", c.confg.ChainID)
-	_, err = writer.Put(context.Background(), prefix, string(value))
+	_, err = writer.Put(context.Background(), prefix, string(value), clientv3.WithLease(c.leaseID))
 	if err != nil {
 		return err
 	}
+	c.latestWriteEtcd = time.Now()
+	log.Printf("write replica state change to etcd %+v", replicaStateChange)
 	return nil
 }
 
