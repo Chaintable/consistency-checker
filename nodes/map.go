@@ -2,6 +2,7 @@ package nodes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -39,8 +40,11 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 			log.Printf("InitFromEtcd: empty value for key %s\n", string(kv.Key))
 			continue
 		}
-		node := Node{
-			Address: string(kv.Value),
+		node := Node{}
+		err := json.Unmarshal(kv.Value, &node)
+		if err != nil {
+			log.Printf("InitFromEtcd: failed to unmarshal value for key %s\n", string(kv.Key))
+			continue
 		}
 		NodeMap.SetByIP(node.Address, node)
 	}
@@ -53,12 +57,15 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 			for _, ev := range wresp.Events {
 				switch ev.Type {
 				case clientv3.EventTypePut:
+					var node Node
+					err := json.Unmarshal(ev.Kv.Value, &node)
+					if err != nil {
+						log.Printf("InitFromEtcd: failed to unmarshal value for key %s\n", string(ev.Kv.Key))
+						continue
+					}
 					if len(ev.Kv.Value) == 0 {
 						log.Printf("InitFromEtcd: empty value for key %s\n", string(ev.Kv.Key))
 						continue
-					}
-					node := Node{
-						Address: string(ev.Kv.Value),
 					}
 					NodeMap.SetByIP(node.Address, node)
 				case clientv3.EventTypeDelete:
