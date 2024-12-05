@@ -17,7 +17,7 @@ import (
 )
 
 type Node struct {
-	Address  string `json:"address"`
+	Address  string `json:"meta"`
 	NodeType uint64 `json:"nodeType"`
 }
 
