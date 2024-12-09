@@ -68,7 +68,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
-	leaseIDResp, err := etcdClient.Grant(context.Background(), 5)
+	leaseIDResp, err := etcdClient.Grant(context.Background(), int64(config.AvailableNodesTTL))
 	if err != nil {
 		log.Printf("grant etcd lease error %+v", err)
 		return nil, err
