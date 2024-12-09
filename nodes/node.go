@@ -17,13 +17,8 @@ import (
 )
 
 type Node struct {
-	Address string `json:"address"`
-}
-
-func NewNode(ip string) *Node {
-	return &Node{
-		Address: ip,
-	}
+	Address  string `json:"meta"`
+	NodeType uint64 `json:"nodeType"`
 }
 
 type JsonRpcReq struct {
@@ -107,6 +102,7 @@ func (node *Node) Check(kafkaLatestBlockNumber uint64) types.ReplicaState {
 			LatestBlockNumber: nil,
 			StateType:         3,
 			Address:           node.Address,
+			NodeType:          node.NodeType,
 		}
 	}
 	if latestBlockNumber >= kafkaLatestBlockNumber {
@@ -114,11 +110,13 @@ func (node *Node) Check(kafkaLatestBlockNumber uint64) types.ReplicaState {
 			LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
 			StateType:         1,
 			Address:           node.Address,
+			NodeType:          node.NodeType,
 		}
 	}
 	return types.ReplicaState{
 		LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
 		StateType:         2,
 		Address:           node.Address,
+		NodeType:          node.NodeType,
 	}
 }
