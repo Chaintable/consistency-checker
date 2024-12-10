@@ -102,17 +102,15 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 
 func (node *Node) Check(kafkaLatestBlockNumber uint64) NodeWithHeight {
 	latestBlockNumber, err := node.EthBlockNumber(10 * time.Millisecond)
-	if err != nil {
-		log.Printf("node %s:%d check failed: %v\n", node.Address, node.Port, err)
-	}
 	nodeWithHeight := NodeWithHeight{Node: *node, LatestBlockNumber: latestBlockNumber}
 	if err != nil {
+		log.Printf("node %s:%d check failed: %v\n", node.Address, node.Port, err)
 		nodeWithHeight.StateType = 3
-	}
-	if latestBlockNumber >= kafkaLatestBlockNumber {
+	} else if latestBlockNumber >= kafkaLatestBlockNumber {
 		nodeWithHeight.StateType = 1
+	} else {
+		nodeWithHeight.StateType = 2
 	}
-	nodeWithHeight.StateType = 2
 	if node.StateType != nodeWithHeight.StateType {
 		nodeWithHeight.ShouldWrite = true
 	}
