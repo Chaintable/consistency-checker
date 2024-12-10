@@ -3,6 +3,7 @@ package check
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
@@ -10,8 +11,6 @@ import (
 	"time"
 
 	"log"
-
-	"encoding/json"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/segmentio/kafka-go"
@@ -32,7 +31,6 @@ type Checker struct {
 	outerNewBlockWriter           *kafka.Writer
 	outerS3Reader                 *s3.Client
 	etcdClient                    *clientv3.Client
-	leaseID                       clientv3.LeaseID
 	confg                         *config.Config
 	latestWriteEtcd               time.Time
 	// 副本80%高度
@@ -68,26 +66,6 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
-	leaseIDResp, err := etcdClient.Grant(context.Background(), int64(config.AvailableNodesTTL))
-	if err != nil {
-		log.Printf("grant etcd lease error %+v", err)
-		return nil, err
-	}
-	keepCh, err := etcdClient.KeepAlive(context.Background(), leaseIDResp.ID)
-	if err != nil {
-		log.Printf("keep alive err %+v", err)
-		return nil, err
-	}
-
-	go func() {
-		for ch := range keepCh {
-			if ch == nil {
-				log.Printf("keep alive error %+v", ch)
-				break
-			}
-		}
-	}()
-
 	return &Checker{
 		innerNewBlockReader:           util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
 		innerReplicaStateChangeWriter: util.NewKafkaWriter(config.InnerBrokers, config.InnerReplicaStateChangeTopic),
@@ -95,7 +73,6 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		outerNewBlockWriter:           util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
 		etcdClient:                    etcdClient,
 		confg:                         config,
-		leaseID:                       leaseIDResp.ID,
 		quit:                          make(chan struct{}),
 	}, nil
 }
@@ -190,7 +167,12 @@ func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) error {
 	return nil
 }
 
-func (c *Checker) check(kafkaLatestBlockNumber uint64) (*types.ReplicaStateChangeNotification, error) {
+type ReplicaStateChangeNotification struct {
+	LatestBlockNumber *hexutil.Big
+	ReplicaStates     []nodes.NodeWithHeight
+}
+
+func (c *Checker) check(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error) {
 	nodeStates := nodes.NodeMap.CheckAll(kafkaLatestBlockNumber)
 	if len(nodeStates) == 0 {
 		return nil, fmt.Errorf("no node")
@@ -206,12 +188,12 @@ func (c *Checker) check(kafkaLatestBlockNumber uint64) (*types.ReplicaStateChang
 	if float64(readyNodes)/float64(len(nodeStates)) >= c.confg.ReadyRatio {
 		for _, nodeState := range nodeStates {
 			if nodeState.StateType == 1 {
-				if latestBlockNumber > int(nodeState.LatestBlockNumber.ToInt().Int64()) {
-					latestBlockNumber = int(nodeState.LatestBlockNumber.ToInt().Int64())
+				if latestBlockNumber > int(nodeState.LatestBlockNumber) {
+					latestBlockNumber = int(nodeState.LatestBlockNumber)
 				}
 			}
 		}
-		return &types.ReplicaStateChangeNotification{
+		return &ReplicaStateChangeNotification{
 			LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
 			ReplicaStates:     nodeStates,
 		}, nil
@@ -219,9 +201,9 @@ func (c *Checker) check(kafkaLatestBlockNumber uint64) (*types.ReplicaStateChang
 	return nil, nil
 }
 
-func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*types.ReplicaStateChangeNotification, error) {
+func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error) {
 	var err error
-	var replicaStateChange *types.ReplicaStateChangeNotification
+	var replicaStateChange *ReplicaStateChangeNotification
 	for i := 0; i < c.confg.CheckNum; i++ {
 		replicaStateChange, err = c.check(kafkaLatestBlockNumber)
 		if err != nil {
@@ -260,13 +242,42 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	return true
 }
 
-func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replicaStateChange *types.ReplicaStateChangeNotification) error {
-	value, err := json.Marshal(replicaStateChange)
+func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replicaStateChange *ReplicaStateChangeNotification) error {
+	ops := make([]clientv3.Op, 0)
+
+	type LastBlockBumber struct {
+		LatestBlockNumber *hexutil.Big `json:"latestBlockNumber"`
+	}
+
+	lastHeight := LastBlockBumber{
+		LatestBlockNumber: replicaStateChange.LatestBlockNumber,
+	}
+
+	lastHeightstr, err := json.Marshal(&lastHeight)
 	if err != nil {
 		return err
 	}
-	prefix := fmt.Sprintf("replicaState/%d/available_nodes", c.confg.ChainID)
-	_, err = writer.Put(context.Background(), prefix, string(value), clientv3.WithLease(c.leaseID))
+	chainIDHex := fmt.Sprintf("0x%x", c.confg.ChainID)
+
+	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%s/lastBlockNumber", chainIDHex), string(lastHeightstr)))
+
+	for _, change := range replicaStateChange.ReplicaStates {
+		if change.ShouldWrite {
+			nodestr, err := json.Marshal(&change.Node)
+			if err != nil {
+				return err
+			}
+			if change.Node.Lease == 0 {
+				return fmt.Errorf(change.Address + " lease is 0")
+			}
+			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%s/nodes/%s_%d", chainIDHex, change.Address, change.Port), string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
+		}
+	}
+
+	_, err = c.etcdClient.Txn(context.Background()).
+		Then(ops...).
+		Commit()
+
 	if err != nil {
 		return err
 	}

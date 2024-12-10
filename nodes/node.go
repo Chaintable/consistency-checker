@@ -6,19 +6,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/Chaintable/pipeline/types"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 )
 
 type Node struct {
-	Address  string `json:"meta"`
-	NodeType uint64 `json:"nodeType"`
+	StateType uint64 `json:"stateType"` // 1 latest, 2 delay, 3 offline
+	Address   string `json:"address"`   //
+	Port      int    `json:"port"`
+	NodeType  uint64 `json:"nodeType"` // 1 state, 2 archive
+	Lease     int64  `json:"-"`        // 0: no lease, >0: lease time
+}
+
+type NodeWithHeight struct {
+	Node
+	LatestBlockNumber uint64
+	ShouldWrite       bool
 }
 
 type JsonRpcReq struct {
@@ -53,7 +58,7 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 		return 0, err
 	}
 
-	url := node.Address
+	url := fmt.Sprintf("%s:%d", node.Address, node.Port)
 	if !strings.HasPrefix(url, "http://") {
 		url = "http://" + url
 	}
@@ -95,28 +100,19 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 	return uint64(blockNum), nil
 }
 
-func (node *Node) Check(kafkaLatestBlockNumber uint64) types.ReplicaState {
+func (node *Node) Check(kafkaLatestBlockNumber uint64) NodeWithHeight {
 	latestBlockNumber, err := node.EthBlockNumber(10 * time.Millisecond)
+	nodeWithHeight := NodeWithHeight{Node: *node, LatestBlockNumber: latestBlockNumber}
 	if err != nil {
-		return types.ReplicaState{
-			LatestBlockNumber: nil,
-			StateType:         3,
-			Address:           node.Address,
-			NodeType:          node.NodeType,
-		}
+		log.Printf("node %s:%d check failed: %v\n", node.Address, node.Port, err)
+		nodeWithHeight.StateType = 3
+	} else if latestBlockNumber >= kafkaLatestBlockNumber {
+		nodeWithHeight.StateType = 1
+	} else {
+		nodeWithHeight.StateType = 2
 	}
-	if latestBlockNumber >= kafkaLatestBlockNumber {
-		return types.ReplicaState{
-			LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
-			StateType:         1,
-			Address:           node.Address,
-			NodeType:          node.NodeType,
-		}
+	if node.StateType != nodeWithHeight.StateType {
+		nodeWithHeight.ShouldWrite = true
 	}
-	return types.ReplicaState{
-		LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
-		StateType:         2,
-		Address:           node.Address,
-		NodeType:          node.NodeType,
-	}
+	return nodeWithHeight
 }

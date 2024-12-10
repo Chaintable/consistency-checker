@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Chaintable/pipeline/types"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -30,7 +29,8 @@ func NewRWMap() *RWMap {
 }
 
 func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
-	prefix := fmt.Sprintf("replicaState/%d/node/", chainID)
+	chainIDHex := fmt.Sprintf("0x%x", chainID)
+	prefix := fmt.Sprintf("%s/nodes/", chainIDHex)
 	resp, err := cli.Get(context.TODO(), prefix, clientv3.WithPrefix())
 	if err != nil {
 		return err
@@ -67,6 +67,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 						log.Printf("InitFromEtcd: empty value for key %s\n", string(ev.Kv.Key))
 						continue
 					}
+					node.Lease = ev.Kv.Lease
 					NodeMap.SetByIP(node.Address, node)
 				case clientv3.EventTypeDelete:
 					address := string(ev.Kv.Key)
@@ -109,9 +110,9 @@ func (m *RWMap) GetAll() []Node {
 	return result
 }
 
-func (m *RWMap) CheckAll(kafkaLatestBlockNumber uint64) []types.ReplicaState {
+func (m *RWMap) CheckAll(kafkaLatestBlockNumber uint64) []NodeWithHeight {
 	nodes := m.GetAll()
-	result := make([]types.ReplicaState, 0)
+	result := make([]NodeWithHeight, 0)
 	lock := sync.Mutex{}
 
 	var wg sync.WaitGroup
