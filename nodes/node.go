@@ -63,6 +63,8 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 		url = "http://" + url
 	}
 
+	fmt.Printf("url: %s\n", url)
+
 	req, err := http.NewRequest("POST", url, bytes.NewReader(reqBodyBytes))
 	if err != nil {
 		return 0, err
