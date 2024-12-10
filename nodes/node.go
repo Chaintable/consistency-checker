@@ -107,9 +107,9 @@ func (node *Node) Check(kafkaLatestBlockNumber uint64) NodeWithHeight {
 		nodeWithHeight.StateType = 3
 	}
 	if latestBlockNumber >= kafkaLatestBlockNumber {
-		nodeWithHeight.StateType = 2
+		nodeWithHeight.StateType = 1
 	}
-	nodeWithHeight.StateType = 1
+	nodeWithHeight.StateType = 2
 	if node.StateType != nodeWithHeight.StateType {
 		nodeWithHeight.ShouldWrite = true
 	}
