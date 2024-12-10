@@ -63,8 +63,6 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 		url = "http://" + url
 	}
 
-	fmt.Printf("url: %s\n", url)
-
 	req, err := http.NewRequest("POST", url, bytes.NewReader(reqBodyBytes))
 	if err != nil {
 		return 0, err
@@ -104,7 +102,10 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 
 func (node *Node) Check(kafkaLatestBlockNumber uint64) NodeWithHeight {
 	latestBlockNumber, err := node.EthBlockNumber(10 * time.Millisecond)
-	nodeWithHeight := NodeWithHeight{Node: *node}
+	if err != nil {
+		log.Printf("node %s:%d check failed: %v\n", node.Address, node.Port, err)
+	}
+	nodeWithHeight := NodeWithHeight{Node: *node, LatestBlockNumber: latestBlockNumber}
 	if err != nil {
 		nodeWithHeight.StateType = 3
 	}
