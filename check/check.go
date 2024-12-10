@@ -174,6 +174,7 @@ type ReplicaStateChangeNotification struct {
 
 func (c *Checker) check(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error) {
 	nodeStates := nodes.NodeMap.CheckAll(kafkaLatestBlockNumber)
+	log.Printf("nodeStates %+v", nodeStates)
 	if len(nodeStates) == 0 {
 		return nil, fmt.Errorf("no node")
 	}
