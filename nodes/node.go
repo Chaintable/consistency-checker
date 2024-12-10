@@ -58,7 +58,7 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 		return 0, err
 	}
 
-	url := node.Address
+	url := fmt.Sprintf("%s:%d", node.Address, node.Port)
 	if !strings.HasPrefix(url, "http://") {
 		url = "http://" + url
 	}
