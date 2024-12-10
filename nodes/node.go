@@ -17,7 +17,7 @@ type Node struct {
 	Address   string `json:"address"`   //
 	Port      int    `json:"port"`
 	NodeType  uint64 `json:"nodeType"` // 1 state, 2 archive
-	Lease     int64  `json:-`          // 0: no lease, >0: lease time
+	Lease     int64  `json:"-"`        // 0: no lease, >0: lease time
 }
 
 type NodeWithHeight struct {
