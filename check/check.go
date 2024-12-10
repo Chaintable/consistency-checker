@@ -31,7 +31,6 @@ type Checker struct {
 	outerNewBlockWriter           *kafka.Writer
 	outerS3Reader                 *s3.Client
 	etcdClient                    *clientv3.Client
-	leaseID                       clientv3.LeaseID
 	confg                         *config.Config
 	latestWriteEtcd               time.Time
 	// 副本80%高度
@@ -67,26 +66,6 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
-	leaseIDResp, err := etcdClient.Grant(context.Background(), int64(config.AvailableNodesTTL))
-	if err != nil {
-		log.Printf("grant etcd lease error %+v", err)
-		return nil, err
-	}
-	keepCh, err := etcdClient.KeepAlive(context.Background(), leaseIDResp.ID)
-	if err != nil {
-		log.Printf("keep alive err %+v", err)
-		return nil, err
-	}
-
-	go func() {
-		for ch := range keepCh {
-			if ch == nil {
-				log.Printf("keep alive error %+v", ch)
-				break
-			}
-		}
-	}()
-
 	return &Checker{
 		innerNewBlockReader:           util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
 		innerReplicaStateChangeWriter: util.NewKafkaWriter(config.InnerBrokers, config.InnerReplicaStateChangeTopic),
@@ -94,7 +73,6 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		outerNewBlockWriter:           util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
 		etcdClient:                    etcdClient,
 		confg:                         config,
-		leaseID:                       leaseIDResp.ID,
 		quit:                          make(chan struct{}),
 	}, nil
 }
@@ -279,8 +257,9 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 	if err != nil {
 		return err
 	}
+	chainIDHex := fmt.Sprintf("0x%x", c.confg.ChainID)
 
-	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
+	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%s/lastBlockNumber", chainIDHex), string(lastHeightstr)))
 
 	for _, change := range replicaStateChange.ReplicaStates {
 		if change.ShouldWrite {
@@ -291,7 +270,7 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 			if change.Node.Lease == 0 {
 				return fmt.Errorf(change.Address + " lease is 0")
 			}
-			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/nodes/%s_%d", c.confg.ChainID, change.Address, change.Port), string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
+			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%s/nodes/%s_%d", chainIDHex, change.Address, change.Port), string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
 		}
 	}
 

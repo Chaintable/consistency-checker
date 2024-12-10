@@ -29,7 +29,8 @@ func NewRWMap() *RWMap {
 }
 
 func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
-	prefix := fmt.Sprintf("replicaState/%d/node/", chainID)
+	chainIDHex := fmt.Sprintf("0x%x", chainID)
+	prefix := fmt.Sprintf("%s/nodes/", chainIDHex)
 	resp, err := cli.Get(context.TODO(), prefix, clientv3.WithPrefix())
 	if err != nil {
 		return err

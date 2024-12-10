@@ -23,14 +23,12 @@ type Config struct {
 	OuterBrokers                 []string `yaml:"outer_brokers"`             // 业务kafka的brokers
 	OuterNewBlockTopic           string   `yaml:"outer_new_block_topic"`     // 业务kafka的topic
 	EtcdEndpoints                []string `yaml:"etcd_endpoints"`            // etcd的endpoints
-	AvailableNodesTTL            int      `yaml:"available_nodes_ttl"`       // 可用节点的TTL
 }
 
 var defaultConfig = Config{
-	Listen:            ":8663",
-	ReadyRatio:        0.8,
-	CheckInterval:     20,
-	AvailableNodesTTL: 5,
+	Listen:        ":8663",
+	ReadyRatio:    0.8,
+	CheckInterval: 20,
 }
 
 func LoadConfig(configPath string) Config {
