@@ -45,7 +45,7 @@ func handleGetBlockByHeight(c *gin.Context, req *nodes.JsonRpcReq) {
 	num := new(big.Int)
 	num, ok := num.SetString(height, 10)
 	if !ok {
-		c.IndentedJSON(-32602, "params error")
+		c.IndentedJSON(-32602, "num params error")
 		return
 	}
 
