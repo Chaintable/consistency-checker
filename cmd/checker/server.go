@@ -7,6 +7,7 @@ import (
 
 	"github.com/Chaintable/consistency-checker/db"
 	"github.com/Chaintable/consistency-checker/nodes"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/gin-gonic/gin"
 )
@@ -98,23 +99,17 @@ func handleGetBlockById(c *gin.Context, req *nodes.JsonRpcReq) {
 		c.JSON(200, NewErrorRsp(-32602, "params not found"))
 		return
 	}
-	blockCtxRaw, err := json.Marshal(req.Params[0])
-	if err != nil {
+	id, ok := req.Params[0].(string)
+	if !ok {
 		c.JSON(200, NewErrorRsp(-32602, "params error"))
 		return
 	}
-	var blockCtx BlockContext
-	if err := json.Unmarshal(blockCtxRaw, &blockCtx); err != nil {
-		c.JSON(200, NewErrorRsp(-32602, "params error"))
-		return
-	}
-
 	if db.DB == nil {
 		c.JSON(200, NewErrorRsp(-39005, "db not initialized"))
 		return
 	}
 
-	block, err := db.DB.GetBlockInfoByNumOrHash(blockCtx.BlockId)
+	block, err := db.DB.GetBlockInfoByHash(common.HexToHash(id))
 	if err != nil {
 		c.JSON(200, NewErrorRsp(-39005, err.Error()))
 		return
@@ -127,23 +122,17 @@ func handleBlockIsValid(c *gin.Context, req *nodes.JsonRpcReq) {
 		c.JSON(200, NewErrorRsp(-32602, "params not found"))
 		return
 	}
-	blockCtxRaw, err := json.Marshal(req.Params[0])
-	if err != nil {
+	id, ok := req.Params[0].(string)
+	if !ok {
 		c.JSON(200, NewErrorRsp(-32602, "params error"))
 		return
 	}
-	var blockCtx BlockContext
-	if err := json.Unmarshal(blockCtxRaw, &blockCtx); err != nil {
-		c.JSON(200, NewErrorRsp(-32602, "params error"))
-		return
-	}
-
 	if db.DB == nil {
 		c.JSON(200, NewErrorRsp(-39005, "db not initialized"))
 		return
 	}
 
-	block0, err := db.DB.GetBlockInfoByNumOrHash(blockCtx.BlockId)
+	block0, err := db.DB.GetBlockInfoByHash(common.HexToHash(id))
 	if err != nil {
 		c.JSON(200, NewErrorRsp(-39005, err.Error()))
 		return
