@@ -59,7 +59,7 @@ func handleGetLatestBlock(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, latestBlock)
+	c.JSON(200, NewJsonRpcRsp(latestBlock))
 }
 
 func handleGetBlockByHeight(c *gin.Context, req *nodes.JsonRpcReq) {
