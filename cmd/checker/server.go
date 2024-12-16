@@ -7,9 +7,14 @@ import (
 
 	"github.com/Chaintable/consistency-checker/db"
 	"github.com/Chaintable/consistency-checker/nodes"
-	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/gin-gonic/gin"
 )
+
+type BlockContext struct {
+	BlockId *rpc.BlockNumberOrHash `json:"block_id"`
+	Type    string                 `json:"type"`
+}
 
 func handleGetLatestBlock(c *gin.Context) {
 	if db.DB == nil {
@@ -62,9 +67,14 @@ func handleGetBlockById(c *gin.Context, req *nodes.JsonRpcReq) {
 		c.IndentedJSON(-32602, "params not found")
 		return
 	}
-	hash := req.Params[0].(string)
-	if hash == "" {
-		c.IndentedJSON(-32602, "params not found")
+	blockCtxRaw, err := json.Marshal(req.Params[0])
+	if err != nil {
+		c.IndentedJSON(-32602, "params error")
+		return
+	}
+	var blockCtx BlockContext
+	if err := json.Unmarshal(blockCtxRaw, &blockCtx); err != nil {
+		c.IndentedJSON(-32602, "params error")
 		return
 	}
 
@@ -73,7 +83,7 @@ func handleGetBlockById(c *gin.Context, req *nodes.JsonRpcReq) {
 		return
 	}
 
-	block, err := db.DB.GetBlockInfoByHash(common.HexToHash(hash))
+	block, err := db.DB.GetBlockInfoByNumOrHash(blockCtx.BlockId)
 	if err != nil {
 		c.IndentedJSON(-39005, err.Error())
 		return
@@ -86,9 +96,14 @@ func handleBlockIsValid(c *gin.Context, req *nodes.JsonRpcReq) {
 		c.IndentedJSON(-32602, "params not found")
 		return
 	}
-	hash := req.Params[0].(string)
-	if hash == "" {
-		c.IndentedJSON(-32602, "params not found")
+	blockCtxRaw, err := json.Marshal(req.Params[0])
+	if err != nil {
+		c.IndentedJSON(-32602, "params error")
+		return
+	}
+	var blockCtx BlockContext
+	if err := json.Unmarshal(blockCtxRaw, &blockCtx); err != nil {
+		c.IndentedJSON(-32602, "params error")
 		return
 	}
 
@@ -97,7 +112,7 @@ func handleBlockIsValid(c *gin.Context, req *nodes.JsonRpcReq) {
 		return
 	}
 
-	block0, err := db.DB.GetBlockInfoByHash(common.HexToHash(hash))
+	block0, err := db.DB.GetBlockInfoByNumOrHash(blockCtx.BlockId)
 	if err != nil {
 		c.IndentedJSON(-39005, err.Error())
 		return

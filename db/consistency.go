@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"math/big"
 	"sync"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 var (
@@ -95,6 +97,23 @@ func (cdb *ConsistencyDB) GetBlockInfoByHash(hash common.Hash) (*BlockInfo, erro
 		ValidationHash: bi.ValidationHash.Int64(),
 		IsFork:         canonicalHash != hash,
 	}, nil
+}
+
+func (cdb *ConsistencyDB) GetBlockInfoByNumOrHash(id *rpc.BlockNumberOrHash) (*BlockInfo, error) {
+	number, ok := id.Number()
+	if ok {
+		if number == -2 || number == -1 {
+			return cdb.GetLatestBlockInfo()
+		}
+		return cdb.GetBlockInfoByNum(big.NewInt(int64(number)))
+	}
+
+	hash, ok := id.Hash()
+	if ok {
+		return cdb.GetBlockInfoByHash(hash)
+	}
+
+	return nil, fmt.Errorf("GetBlockInfoByNumOrHash params error")
 }
 
 func (cdb *ConsistencyDB) GetBlockInfoByNum(num *big.Int) (*BlockInfo, error) {
