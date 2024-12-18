@@ -150,15 +150,15 @@ func index(c *gin.Context) {
 	req := &nodes.JsonRpcReq{}
 	bodyBytes, _ := io.ReadAll(c.Request.Body)
 	if err := json.Unmarshal(bodyBytes, req); err != nil {
-		c.IndentedJSON(-32700, "request body invalid json")
+		c.IndentedJSON(200, NewErrorRsp(-32700, "parse error"))
 		return
 	}
 	if req.JsonRpc != "2.0" {
-		c.IndentedJSON(-32600, "jsonrpc version not supported")
+		c.IndentedJSON(200, NewErrorRsp(-32600, "jsonrpc version not found"))
 		return
 	}
 	if req.Method == "" {
-		c.IndentedJSON(-32601, "method not found")
+		c.IndentedJSON(200, NewErrorRsp(-32601, "method not found"))
 		return
 	}
 	switch req.Method {
@@ -171,7 +171,7 @@ func index(c *gin.Context) {
 	case "blockIsValid":
 		handleBlockIsValid(c, req)
 	default:
-		c.IndentedJSON(-32601, "method not found")
+		c.IndentedJSON(200, NewErrorRsp(-32601, "method not found"))
 	}
 }
 
