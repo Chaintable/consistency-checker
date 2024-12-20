@@ -26,13 +26,12 @@ import (
 )
 
 type Checker struct {
-	innerNewBlockReader           *kafka.Reader
-	innerReplicaStateChangeWriter *kafka.Writer
-	outerNewBlockWriter           *kafka.Writer
-	outerS3Reader                 *s3.Client
-	etcdClient                    *clientv3.Client
-	confg                         *config.Config
-	latestWriteEtcd               time.Time
+	innerNewBlockReader *kafka.Reader
+	outerNewBlockWriter *kafka.Writer
+	outerS3Reader       *s3.Client
+	etcdClient          *clientv3.Client
+	confg               *config.Config
+	latestWriteEtcd     time.Time
 	// 副本80%高度
 	ReplicaLatestBlockNumber uint64
 	quit                     chan struct{}
@@ -67,13 +66,12 @@ func NewChecker(config *config.Config) (*Checker, error) {
 	}
 
 	return &Checker{
-		innerNewBlockReader:           util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
-		innerReplicaStateChangeWriter: util.NewKafkaWriter(config.InnerBrokers, config.InnerReplicaStateChangeTopic),
-		outerS3Reader:                 innerS3Reader,
-		outerNewBlockWriter:           util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
-		etcdClient:                    etcdClient,
-		confg:                         config,
-		quit:                          make(chan struct{}),
+		innerNewBlockReader: util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
+		outerS3Reader:       innerS3Reader,
+		outerNewBlockWriter: util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
+		etcdClient:          etcdClient,
+		confg:               config,
+		quit:                make(chan struct{}),
 	}, nil
 }
 
