@@ -46,6 +46,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 			log.Printf("InitFromEtcd: failed to unmarshal value for key %s\n", string(kv.Key))
 			continue
 		}
+		node.Lease = kv.Lease
 		NodeMap.SetByIP(node.Address, node)
 	}
 
