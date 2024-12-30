@@ -10,6 +10,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/Chaintable/consistency-checker/metrics"
+
 	"log"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -371,6 +373,7 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 
 func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 	for _, block := range newBlocks {
+		metrics.LatestPushedBlockNumber.Set(float64(block.BlockNumber))
 		b := &types.OuterBlockChangeNotification{
 			BlockNumber: block.BlockNumber,
 			Hash:        block.Hash,
