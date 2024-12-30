@@ -16,5 +16,5 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(NodeInfo)
+	prometheus.MustRegister(NodeInfo, LatestPushedBlockNumber)
 }
