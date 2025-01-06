@@ -257,9 +257,8 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 	if err != nil {
 		return err
 	}
-	chainIDs := c.confg.ChainID
 
-	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%s/lastBlockNumber", chainIDs), string(lastHeightstr)))
+	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
 
 	for _, change := range replicaStateChange.ReplicaStates {
 		if change.ShouldWrite {
@@ -270,7 +269,7 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 			if change.Node.Lease == 0 {
 				return fmt.Errorf(change.Address + " lease is 0")
 			}
-			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%s/nodes/%s_%d", chainIDs, change.Address, change.Port), string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
+			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/nodes/%s_%d", c.confg.ChainID, change.Address, change.Port), string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
 		}
 	}
 
