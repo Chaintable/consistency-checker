@@ -3,11 +3,12 @@ module github.com/Chaintable/consistency-checker
 go 1.22.5
 
 require (
-	github.com/Chaintable/pipeline v0.0.26
+	github.com/Chaintable/pipeline v0.0.31
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.66.3
 	github.com/cockroachdb/pebble v1.1.2
 	github.com/ethereum/go-ethereum v1.14.11
 	github.com/gin-gonic/gin v1.8.1
+	github.com/prometheus/client_golang v1.20.5
 	github.com/segmentio/kafka-go v0.4.47
 	go.etcd.io/etcd/client/v3 v3.5.17
 	gopkg.in/yaml.v3 v3.0.1
@@ -78,7 +79,6 @@ require (
 	github.com/pelletier/go-toml/v2 v2.0.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.20.5 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.60.1 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect

@@ -2,10 +2,13 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/Chaintable/consistency-checker/metrics"
 
 	"github.com/Chaintable/consistency-checker/check"
 	"github.com/Chaintable/consistency-checker/config"
@@ -46,6 +49,8 @@ func main() {
 	go func() {
 		checker.Run()
 	}()
+
+	metrics.NodeInfo.WithLabelValues(fmt.Sprint(config.ChainID), "consistency-checker").Set(1)
 
 	startHTTPServer(config.Listen)
 

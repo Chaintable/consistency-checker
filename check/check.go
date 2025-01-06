@@ -10,6 +10,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/Chaintable/consistency-checker/metrics"
+
 	"log"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -255,9 +257,8 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 	if err != nil {
 		return err
 	}
-	chainIDHex := fmt.Sprintf("0x%x", c.confg.ChainID)
 
-	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%s/lastBlockNumber", chainIDHex), string(lastHeightstr)))
+	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
 
 	for _, change := range replicaStateChange.ReplicaStates {
 		if change.ShouldWrite {
@@ -268,7 +269,7 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 			if change.Node.Lease == 0 {
 				return fmt.Errorf(change.Address + " lease is 0")
 			}
-			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%s/nodes/%s_%d", chainIDHex, change.Address, change.Port), string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
+			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/nodes/%s_%d", c.confg.ChainID, change.Address, change.Port), string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
 		}
 	}
 
@@ -371,6 +372,7 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 
 func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 	for _, block := range newBlocks {
+		metrics.LatestPushedBlockNumber.Set(float64(block.BlockNumber))
 		b := &types.OuterBlockChangeNotification{
 			BlockNumber: block.BlockNumber,
 			Hash:        block.Hash,

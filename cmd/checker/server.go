@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type JsonRpcRsp struct {
@@ -182,7 +183,8 @@ func startHTTPServer(listen string) {
 		gin.Recovery(),
 	)
 
-	// retrace handlers
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
 	router.Any("/", index)
 
 	go func() {
