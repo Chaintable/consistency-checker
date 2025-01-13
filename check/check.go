@@ -373,6 +373,7 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 	for _, block := range newBlocks {
 		metrics.LatestPushedBlockNumber.Set(float64(block.BlockNumber))
+		metrics.LatestPushedBlockTime.Set(float64(block.Timestamp))
 		b := &types.OuterBlockChangeNotification{
 			BlockNumber: block.BlockNumber,
 			Hash:        block.Hash,
