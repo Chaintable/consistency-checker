@@ -11,10 +11,15 @@ var (
 	// pipeline_latest_pushed_block_number
 	LatestPushedBlockNumber = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "pipeline",
-		Name:      "latest_pushed_block_number",
+		Name:      "block_num",
+	})
+
+	LatestPushedBlockTime = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "pipeline",
+		Name:      "block_time",
 	})
 )
 
 func init() {
-	prometheus.MustRegister(NodeInfo, LatestPushedBlockNumber)
+	prometheus.MustRegister(NodeInfo, LatestPushedBlockNumber, LatestPushedBlockTime)
 }
