@@ -28,12 +28,13 @@ import (
 )
 
 type Checker struct {
-	innerNewBlockReader *kafka.Reader
-	outerNewBlockWriter *kafka.Writer
-	outerS3Reader       *s3.Client
-	etcdClient          *clientv3.Client
-	confg               *config.Config
-	latestWriteEtcd     time.Time
+	innerNewBlockReader                *kafka.Reader
+	outerNewBlockWriter                *kafka.Writer
+	outerS3Reader                      *s3.Client
+	etcdClient                         *clientv3.Client
+	confg                              *config.Config
+	latestWriteEtcd                    time.Time
+	latestOuterBlockChangeNotification *types.OuterBlockChangeNotification
 	// 副本80%高度
 	ReplicaLatestBlockNumber uint64
 	quit                     chan struct{}
@@ -67,13 +68,21 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
+	outerReader := util.NewKafkaReader(config.OuterBrokers, config.OuterNewBlockTopic, "")
+	latestOuterBlockChangeNotification, err := GetLastOuterBlockNotice(outerReader)
+	if err != nil {
+		log.Printf("get last outer block notice error %+v", err)
+		return nil, err
+	}
+
 	return &Checker{
-		innerNewBlockReader: util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
-		outerS3Reader:       innerS3Reader,
-		outerNewBlockWriter: util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
-		etcdClient:          etcdClient,
-		confg:               config,
-		quit:                make(chan struct{}),
+		innerNewBlockReader:                util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
+		outerS3Reader:                      innerS3Reader,
+		outerNewBlockWriter:                util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
+		etcdClient:                         etcdClient,
+		confg:                              config,
+		latestOuterBlockChangeNotification: latestOuterBlockChangeNotification,
+		quit:                               make(chan struct{}),
 	}, nil
 }
 
@@ -311,7 +320,36 @@ func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
 	return true
 }
 
+func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
+	if c.latestOuterBlockChangeNotification == nil {
+		if blockNotice.NewBlocks[0].BlockNumber != 0 {
+			log.Printf("first block number should be 0")
+			return false
+		}
+	}
+	if c.latestOuterBlockChangeNotification != nil {
+		if len(blockNotice.DropBlocks) > 0 {
+			if blockNotice.DropBlocks[len(blockNotice.DropBlocks)-1].Hash != c.latestOuterBlockChangeNotification.Hash {
+				log.Printf("drop block hash is not equal to latest block hash")
+				return false
+			}
+		} else {
+			if blockNotice.NewBlocks[0].ParentHash != c.latestOuterBlockChangeNotification.Hash {
+				log.Printf("new block parentHash is not equal to latest block hash")
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
+	// 0. 消息校验
+	if !c.msgCheck(blockNotice) {
+		log.Printf("msg check error")
+		return false
+	}
+
 	// kafka最新高度
 	kafkaLatestBlockNumber := blockNotice.NewBlocks[len(blockNotice.NewBlocks)-1].BlockNumber
 
@@ -386,6 +424,7 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 			log.Printf("write new block notice error %+v", err)
 			return false
 		}
+		c.latestOuterBlockChangeNotification = b
 	}
 	return true
 }
@@ -438,4 +477,38 @@ shutdown:
 	c.innerNewBlockReader.Close()
 	c.outerNewBlockWriter.Close()
 	c.etcdClient.Close()
+}
+
+// 获取最后一个OuterBlockChangeNotification
+func GetLastOuterBlockNotice(reader *kafka.Reader) (*types.OuterBlockChangeNotification, error) {
+	reader.SetOffset(0)
+	lag, err := reader.ReadLag(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	if lag == 0 {
+		return nil, nil
+	}
+
+	err = reader.SetOffset(lag - 1)
+	if err != nil {
+		return nil, err
+	}
+
+	msg, err := reader.ReadMessage(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	if !bytes.Equal(msg.Key, []byte("NewBlock")) {
+		return nil, fmt.Errorf("last message is not NewBlock")
+	}
+
+	blockNotice := &types.OuterBlockChangeNotification{}
+	err = util.DecodeFromGzipJson(msg.Value, blockNotice)
+	if err != nil {
+		return nil, err
+	}
+
+	return blockNotice, nil
 }
