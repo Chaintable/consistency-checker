@@ -155,7 +155,7 @@ func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, blockValidation int
 		Key:    &s3Key,
 		Body:   bytes.NewReader(data),
 	}
-	_, err = c.outerS3Reader.PutObject(context.Background(), params, nil)
+	_, err = c.outerS3Reader.PutObject(context.Background(), params)
 	if err != nil {
 		return err
 	}
@@ -168,6 +168,7 @@ func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) error {
 		if err != nil {
 			return err
 		}
+		log.Printf("rewrite block %d", block.BlockNumber)
 		err = c.rewriteBlock(&block, blockValidation)
 		if err != nil {
 			return err

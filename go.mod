@@ -3,7 +3,7 @@ module github.com/Chaintable/consistency-checker
 go 1.22.5
 
 require (
-	github.com/Chaintable/pipeline v0.0.31
+	github.com/Chaintable/pipeline v0.0.38
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.66.3
 	github.com/cockroachdb/pebble v1.1.2
 	github.com/ethereum/go-ethereum v1.14.11
