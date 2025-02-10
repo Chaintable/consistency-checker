@@ -336,7 +336,7 @@ func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
 			}
 		} else {
 			if blockNotice.NewBlocks[0].ParentHash != c.latestOuterBlockChangeNotification.Hash {
-				log.Printf("new block parentHash is not equal to latest block hash")
+				log.Printf("new block parentHash is not equal to latest block hash, blockNotice.NewBlocks %+v, c.latestOuterBlockChangeNotification %+v", blockNotice.NewBlocks, c.latestOuterBlockChangeNotification)
 				return false
 			}
 		}
