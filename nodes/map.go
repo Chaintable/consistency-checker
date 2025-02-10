@@ -49,10 +49,8 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 		NodeMap.SetByIP(node.Address, node)
 	}
 
-	lastRev := resp.Header.Revision
-
 	go func() {
-		rch := cli.Watch(context.Background(), prefix, clientv3.WithPrefix(), clientv3.WithRev(lastRev+1))
+		rch := cli.Watch(context.Background(), prefix, clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision))
 		for wresp := range rch {
 			for _, ev := range wresp.Events {
 				switch ev.Type {
