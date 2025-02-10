@@ -39,6 +39,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 			log.Printf("InitFromEtcd: empty value for key %s\n", string(kv.Key))
 			continue
 		}
+		fmt.Printf("key: %s, value: %s\n", string(kv.Key), string(kv.Value))
 		node := Node{}
 		err := json.Unmarshal(kv.Value, &node)
 		if err != nil {
