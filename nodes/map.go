@@ -39,6 +39,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 			log.Printf("InitFromEtcd: empty value for key %s\n", string(kv.Key))
 			continue
 		}
+		fmt.Printf("key: %s, value: %s\n", string(kv.Key), string(kv.Value))
 		node := Node{}
 		err := json.Unmarshal(kv.Value, &node)
 		if err != nil {
@@ -49,15 +50,14 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 		NodeMap.SetByIP(node.Address, node)
 	}
 
-	lastRev := resp.Header.Revision
-
 	go func() {
-		rch := cli.Watch(context.Background(), prefix, clientv3.WithPrefix(), clientv3.WithRev(lastRev+1))
+		rch := cli.Watch(context.Background(), prefix, clientv3.WithPrefix(), clientv3.WithRev(resp.Header.Revision))
 		for wresp := range rch {
 			for _, ev := range wresp.Events {
 				switch ev.Type {
 				case clientv3.EventTypePut:
 					var node Node
+					fmt.Printf("key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
 					err := json.Unmarshal(ev.Kv.Value, &node)
 					if err != nil {
 						log.Printf("InitFromEtcd: failed to unmarshal value for key %s\n", string(ev.Kv.Key))
