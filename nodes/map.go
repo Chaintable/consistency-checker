@@ -57,6 +57,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 				switch ev.Type {
 				case clientv3.EventTypePut:
 					var node Node
+					fmt.Printf("key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
 					err := json.Unmarshal(ev.Kv.Value, &node)
 					if err != nil {
 						log.Printf("InitFromEtcd: failed to unmarshal value for key %s\n", string(ev.Kv.Key))
