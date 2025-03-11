@@ -47,7 +47,9 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 			continue
 		}
 		node.Lease = kv.Lease
-		NodeMap.SetByIP(node.Address, node)
+		address := string(kv.Key)
+		address = strings.TrimPrefix(address, prefix)
+		NodeMap.SetByIP(address, node)
 	}
 
 	go func() {
@@ -68,7 +70,9 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 						continue
 					}
 					node.Lease = ev.Kv.Lease
-					NodeMap.SetByIP(node.Address, node)
+					address := string(ev.Kv.Key)
+					address = strings.TrimPrefix(address, prefix)
+					NodeMap.SetByIP(address, node)
 				case clientv3.EventTypeDelete:
 					fmt.Printf("put key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
 					address := string(ev.Kv.Key)
