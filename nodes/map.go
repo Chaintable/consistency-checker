@@ -47,7 +47,9 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 			continue
 		}
 		node.Lease = kv.Lease
-		NodeMap.SetByIP(node.Address, node)
+		address := string(kv.Key)
+		address = strings.TrimPrefix(address, prefix)
+		NodeMap.SetByIP(address, node)
 	}
 
 	go func() {
@@ -57,7 +59,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 				switch ev.Type {
 				case clientv3.EventTypePut:
 					var node Node
-					fmt.Printf("key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
+					fmt.Printf("put key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
 					err := json.Unmarshal(ev.Kv.Value, &node)
 					if err != nil {
 						log.Printf("InitFromEtcd: failed to unmarshal value for key %s\n", string(ev.Kv.Key))
@@ -68,8 +70,11 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 						continue
 					}
 					node.Lease = ev.Kv.Lease
-					NodeMap.SetByIP(node.Address, node)
+					address := string(ev.Kv.Key)
+					address = strings.TrimPrefix(address, prefix)
+					NodeMap.SetByIP(address, node)
 				case clientv3.EventTypeDelete:
+					fmt.Printf("del key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
 					address := string(ev.Kv.Key)
 					address = strings.TrimPrefix(address, prefix)
 					NodeMap.DeleteByIP(address)
@@ -87,7 +92,7 @@ func (m *RWMap) GetByIP(ip string) Node {
 }
 
 func (m *RWMap) SetByIP(ip string, node Node) {
-	log.Printf("add node: %s\n", node.Address)
+	log.Printf("add node: %s\n", ip)
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	m.m[ip] = node
@@ -107,6 +112,7 @@ func (m *RWMap) GetAll() []Node {
 	for _, node := range m.m {
 		result = append(result, node)
 	}
+	log.Printf("get all nodes: %+v\n", result)
 	return result
 }
 
