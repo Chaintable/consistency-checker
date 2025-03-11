@@ -74,7 +74,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 					address = strings.TrimPrefix(address, prefix)
 					NodeMap.SetByIP(address, node)
 				case clientv3.EventTypeDelete:
-					fmt.Printf("put key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
+					fmt.Printf("del key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
 					address := string(ev.Kv.Key)
 					address = strings.TrimPrefix(address, prefix)
 					NodeMap.DeleteByIP(address)
@@ -112,7 +112,7 @@ func (m *RWMap) GetAll() []Node {
 	for _, node := range m.m {
 		result = append(result, node)
 	}
-	log.Printf("get all nodes: %v\n", result)
+	log.Printf("get all nodes: %+v\n", result)
 	return result
 }
 
