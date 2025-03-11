@@ -57,7 +57,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 				switch ev.Type {
 				case clientv3.EventTypePut:
 					var node Node
-					fmt.Printf("key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
+					fmt.Printf("put key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
 					err := json.Unmarshal(ev.Kv.Value, &node)
 					if err != nil {
 						log.Printf("InitFromEtcd: failed to unmarshal value for key %s\n", string(ev.Kv.Key))
@@ -70,6 +70,7 @@ func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
 					node.Lease = ev.Kv.Lease
 					NodeMap.SetByIP(node.Address, node)
 				case clientv3.EventTypeDelete:
+					fmt.Printf("put key: %s, value: %s\n", string(ev.Kv.Key), string(ev.Kv.Value))
 					address := string(ev.Kv.Key)
 					address = strings.TrimPrefix(address, prefix)
 					NodeMap.DeleteByIP(address)
@@ -107,6 +108,7 @@ func (m *RWMap) GetAll() []Node {
 	for _, node := range m.m {
 		result = append(result, node)
 	}
+	log.Printf("get all nodes: %v\n", result)
 	return result
 }
 
