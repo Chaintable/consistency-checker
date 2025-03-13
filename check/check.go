@@ -229,7 +229,7 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateCh
 
 func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	// 如果副本高度大于kafka最新高度，直接返回(一致性节点后上线)
-	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber && time.Since(c.latestWriteEtcd) < 1*time.Second {
+	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber && time.Since(c.latestWriteEtcd) < 10*time.Second {
 		return true
 	}
 
