@@ -35,6 +35,7 @@ type Checker struct {
 	confg                              *config.Config
 	latestWriteEtcd                    time.Time
 	latestOuterBlockChangeNotification *types.OuterBlockChangeNotification
+	latestMsgOffset                    int64
 	// 副本80%高度
 	ReplicaLatestBlockNumber uint64
 	quit                     chan struct{}
@@ -450,6 +451,10 @@ func (c *Checker) Run() {
 				continue
 			}
 			for {
+				if c.latestMsgOffset != 0 && msg.Offset <= c.latestMsgOffset {
+					log.Printf("msg offset %d is same as last offset %d", msg.Offset, c.latestMsgOffset)
+					break
+				}
 				if !c.Process(blockNotice) {
 					log.Printf("process error %+v", err)
 					time.Sleep(1 * time.Second)
@@ -465,6 +470,7 @@ func (c *Checker) Run() {
 					time.Sleep(1 * time.Second)
 					continue
 				} else {
+					c.latestMsgOffset = msg.Offset
 					if msg.Offset%100 == 0 {
 						log.Printf("CommitMessages last offset %d, blockNotice %v", msg.Offset, blockNotice)
 					}
