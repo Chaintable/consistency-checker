@@ -77,7 +77,12 @@ func NewChecker(config *config.Config) (*Checker, error) {
 	}
 
 	return &Checker{
-		innerNewBlockReader:                util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
+		innerNewBlockReader: kafka.NewReader(kafka.ReaderConfig{
+			Brokers:        config.InnerBrokers,
+			Topic:          config.InnerNewBlockTopic,
+			GroupID:        config.InnerNewBlockGroupID,
+			CommitInterval: time.Second,
+		}),
 		outerS3Reader:                      innerS3Reader,
 		outerNewBlockWriter:                util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
 		etcdClient:                         etcdClient,
