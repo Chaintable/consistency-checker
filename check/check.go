@@ -328,12 +328,6 @@ func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
 }
 
 func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
-	if c.latestOuterBlockChangeNotification == nil {
-		if blockNotice.NewBlocks[0].BlockNumber != 0 {
-			log.Printf("first block number should be 0")
-			return false
-		}
-	}
 	if c.latestOuterBlockChangeNotification != nil {
 		if len(blockNotice.DropBlocks) > 0 {
 			if blockNotice.DropBlocks[len(blockNotice.DropBlocks)-1].Hash != c.latestOuterBlockChangeNotification.Hash {
