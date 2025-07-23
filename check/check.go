@@ -75,6 +75,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		log.Printf("get last outer block notice error %+v", err)
 		return nil, err
 	}
+	log.Printf("latestOuterBlockChangeNotification %+v", latestOuterBlockChangeNotification)
 
 	innerNewBlockReader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        config.InnerBrokers,
