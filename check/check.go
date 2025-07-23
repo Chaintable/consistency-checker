@@ -85,7 +85,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 	})
 
 	if latestOuterBlockChangeNotification == nil {
-		innerNewBlockReader.SetOffset(-1)
+		innerNewBlockReader.SetOffset(-2)
 	}
 
 	return &Checker{
