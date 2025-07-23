@@ -76,6 +76,17 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
+	innerNewBlockReader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:        config.InnerBrokers,
+		Topic:          config.InnerNewBlockTopic,
+		GroupID:        config.InnerNewBlockGroupID,
+		CommitInterval: time.Second,
+	})
+
+	if latestOuterBlockChangeNotification == nil {
+		innerNewBlockReader.SetOffset(-1)
+	}
+
 	return &Checker{
 		innerNewBlockReader: kafka.NewReader(kafka.ReaderConfig{
 			Brokers:        config.InnerBrokers,
