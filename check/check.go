@@ -84,10 +84,6 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		CommitInterval: time.Duration(config.CommitInterval * int(time.Second)),
 	})
 
-	if latestOuterBlockChangeNotification == nil {
-		innerNewBlockReader.SetOffset(kafka.LastOffset)
-	}
-
 	return &Checker{
 		innerNewBlockReader:                innerNewBlockReader,
 		outerS3Reader:                      innerS3Reader,
