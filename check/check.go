@@ -76,8 +76,24 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
+	innerNewBlockReader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:        config.InnerBrokers,
+		Topic:          config.InnerNewBlockTopic,
+		GroupID:        config.InnerNewBlockGroupID,
+		CommitInterval: time.Second,
+	})
+
+	if latestOuterBlockChangeNotification == nil {
+		innerNewBlockReader.SetOffset(-1)
+	}
+
 	return &Checker{
-		innerNewBlockReader:                util.NewKafkaReader(config.InnerBrokers, config.InnerNewBlockTopic, config.InnerNewBlockGroupID),
+		innerNewBlockReader: kafka.NewReader(kafka.ReaderConfig{
+			Brokers:        config.InnerBrokers,
+			Topic:          config.InnerNewBlockTopic,
+			GroupID:        config.InnerNewBlockGroupID,
+			CommitInterval: time.Second,
+		}),
 		outerS3Reader:                      innerS3Reader,
 		outerNewBlockWriter:                util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
 		etcdClient:                         etcdClient,
@@ -323,12 +339,6 @@ func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
 }
 
 func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
-	if c.latestOuterBlockChangeNotification == nil {
-		if blockNotice.NewBlocks[0].BlockNumber != 0 {
-			log.Printf("first block number should be 0")
-			return false
-		}
-	}
 	if c.latestOuterBlockChangeNotification != nil {
 		if len(blockNotice.DropBlocks) > 0 {
 			if blockNotice.DropBlocks[len(blockNotice.DropBlocks)-1].Hash != c.latestOuterBlockChangeNotification.Hash {
