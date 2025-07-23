@@ -80,7 +80,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		Brokers:        config.InnerBrokers,
 		Topic:          config.InnerNewBlockTopic,
 		GroupID:        config.InnerNewBlockGroupID,
-		CommitInterval: time.Second,
+		CommitInterval: time.Duration(config.CommitInterval * int(time.Second)),
 	})
 
 	if latestOuterBlockChangeNotification == nil {
@@ -88,12 +88,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 	}
 
 	return &Checker{
-		innerNewBlockReader: kafka.NewReader(kafka.ReaderConfig{
-			Brokers:        config.InnerBrokers,
-			Topic:          config.InnerNewBlockTopic,
-			GroupID:        config.InnerNewBlockGroupID,
-			CommitInterval: time.Second,
-		}),
+		innerNewBlockReader:                innerNewBlockReader,
 		outerS3Reader:                      innerS3Reader,
 		outerNewBlockWriter:                util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
 		etcdClient:                         etcdClient,

@@ -22,6 +22,7 @@ type Config struct {
 	OuterBrokers         []string `yaml:"outer_brokers"`            // 业务kafka的brokers
 	OuterNewBlockTopic   string   `yaml:"outer_new_block_topic"`    // 业务kafka的topic
 	EtcdEndpoints        []string `yaml:"etcd_endpoints"`           // etcd的endpoints
+	CommitInterval       int      `yaml:"commit_interval"`          // 提交到kafka的间隔
 }
 
 var defaultConfig = Config{
