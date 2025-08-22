@@ -490,6 +490,36 @@ shutdown:
 
 // 获取最后一个OuterBlockChangeNotification
 func GetLastOuterBlockNotice(reader *kafka.Reader) (*types.OuterBlockChangeNotification, error) {
+	// 获取 reader 配置信息
+	config := reader.Config()
+	if len(config.Brokers) == 0 {
+		return nil, fmt.Errorf("no brokers configured")
+	}
+
+	// 连接到 topic 的 leader broker
+	conn, err := kafka.DialLeader(context.Background(), "tcp", config.Brokers[0], config.Topic, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// 获取低水位
+	firstOffset, err := conn.ReadFirstOffset()
+	if err != nil {
+		return nil, err
+	}
+
+	// 获取高水位
+	lastOffset, err := conn.ReadLastOffset()
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果高水位和低水位相同，说明 topic 中没有消息
+	if firstOffset == lastOffset {
+		return nil, nil
+	}
+
 	reader.SetOffset(0)
 	lag, err := reader.ReadLag(context.Background())
 	if err != nil {
