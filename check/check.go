@@ -403,13 +403,27 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 			Timestamp:   block.Timestamp,
 			IsFork:      true,
 		}
-		err := util.WriteOuterBlockNotice(c.outerNewBlockWriter, b)
+		err := WriteOuterBlockNotice(c.outerNewBlockWriter, b)
 		if err != nil {
 			log.Printf("write drop block notice error %+v", err)
 			return false
 		}
 	}
 	return true
+}
+
+func WriteOuterBlockNotice(writer *kafka.Writer, outerBlockNotice *types.OuterBlockChangeNotification) error {
+	value, err := util.EncodeToJsonGzip(outerBlockNotice)
+	if err != nil {
+		return err
+	}
+	err = writer.WriteMessages(context.Background(), kafka.Message{
+		Value: value,
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
@@ -423,7 +437,7 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 			Timestamp:   block.Timestamp,
 			IsFork:      false,
 		}
-		err := util.WriteOuterBlockNotice(c.outerNewBlockWriter, b)
+		err := WriteOuterBlockNotice(c.outerNewBlockWriter, b)
 		if err != nil {
 			log.Printf("write new block notice error %+v", err)
 			return false
