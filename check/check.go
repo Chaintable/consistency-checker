@@ -8,12 +8,14 @@ import (
 	"math"
 	"math/big"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Chaintable/consistency-checker/metrics"
 
 	"log"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/segmentio/kafka-go"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -184,6 +186,69 @@ func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) error {
 		}
 	}
 	return nil
+}
+
+// rewriteForkBlocksAtSameHeight 检查S3中相同高度但不同hash的区块，将其标记为fork
+func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) {
+	for _, block := range newBlocks {
+		// 列出该高度下的所有区块
+		prefix := fmt.Sprintf("%d/%d/", c.confg.ChainID, block.BlockNumber)
+		listParams := &s3.ListObjectsV2Input{
+			Bucket: &c.confg.OuterS3Bucket,
+			Prefix: &prefix,
+		}
+
+		resp, err := c.outerS3Reader.ListObjectsV2(context.Background(), listParams)
+		if err != nil {
+			log.Printf("list objects at height %d error: %+v", block.BlockNumber, err)
+			continue // 继续处理其他区块
+		}
+
+		// 遍历该高度下的所有区块
+		for _, obj := range resp.Contents {
+			if obj.Key == nil {
+				continue
+			}
+
+			// 从key中提取hash
+			// key格式: {chainID}/{blockNumber}/{hash}
+			keyParts := bytes.Split([]byte(*obj.Key), []byte("/"))
+			if len(keyParts) != 3 {
+				continue
+			}
+
+			existingHashStr := string(keyParts[2])
+
+			// 如果hash不同，说明是fork，需要重写
+			if !strings.EqualFold(existingHashStr, block.Hash.String()) {
+				log.Printf("found fork block at height %d: existing hash %s, new canonical hash %s",
+					block.BlockNumber, existingHashStr, block.Hash.String())
+
+				// 获取原有的validation hash
+				forkBlockCtx := types.BlockContext{
+					BlockNumber: block.BlockNumber,
+					Hash:        common.HexToHash(existingHashStr),
+				}
+
+				forkValidationHash, err := c.getValidationHash(&forkBlockCtx)
+				if err != nil {
+					log.Printf("get fork block validation hash error: %+v", err)
+					continue
+				}
+
+				// 重写为fork
+				err = c.rewriteBlock(&forkBlockCtx, forkValidationHash)
+				if err != nil {
+					log.Printf("rewrite fork block %s at height %d error: %+v",
+						existingHashStr, block.BlockNumber, err)
+				} else {
+					log.Printf("successfully marked block %s at height %d as fork",
+						existingHashStr, block.BlockNumber)
+				}
+			}
+		}
+	}
+
 }
 
 type ReplicaStateChangeNotification struct {
@@ -380,13 +445,16 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 		return false
 	}
 
-	// 4. 发送drop block通知
+	// 4. 检查并重写S3中相同高度但不同hash的BlockValidation，标记IsFork=true
+	c.rewriteForkBlocksAtSameHeight(newBlocks)
+
+	// 5. 发送drop block通知
 	if !c.WriteDropBlockNotice(dropBlocks) {
 		log.Printf("write drop block notice error")
 		return false
 	}
 
-	// 5. 发送新块通知
+	// 6. 发送新块通知
 	if !c.WriteNewBlockNotice(newBlocks) {
 		log.Printf("write new block notice error")
 		return false
