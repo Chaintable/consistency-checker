@@ -553,6 +553,7 @@ func (c *Checker) Run() {
 shutdown:
 	c.innerNewBlockReader.Close()
 	c.outerNewBlockWriter.Close()
+	nodes.NodeMap.StopWatch()
 	c.etcdClient.Close()
 }
 
