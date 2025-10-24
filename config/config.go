@@ -23,12 +23,14 @@ type Config struct {
 	OuterNewBlockTopic   string   `yaml:"outer_new_block_topic"`    // 业务kafka的topic
 	EtcdEndpoints        []string `yaml:"etcd_endpoints"`           // etcd的endpoints
 	CommitInterval       int      `yaml:"commit_interval"`          // 提交到kafka的间隔
+	EtcdWriteTimeout     int      `yaml:"etcd_write_timeout_ms"`    // etcd写入超时时间(毫秒)
 }
 
 var defaultConfig = Config{
-	Listen:        ":8663",
-	ReadyRatio:    0.8,
-	CheckInterval: 20,
+	Listen:           ":8663",
+	ReadyRatio:       0.8,
+	CheckInterval:    20,
+	EtcdWriteTimeout: 5000, // 5 seconds default
 }
 
 func LoadConfig(configPath string) Config {

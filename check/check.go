@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -358,11 +359,21 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 		}
 	}
 
-	_, err = c.etcdClient.Txn(context.Background()).
+	timeout := time.Duration(c.confg.EtcdWriteTimeout) * time.Millisecond
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	_, err = c.etcdClient.Txn(ctx).
 		Then(ops...).
 		Commit()
 
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Printf("etcd write timeout: %v", err)
+		}
 		return err
 	}
 	c.latestWriteEtcd = time.Now()
