@@ -366,9 +366,13 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	log.Printf("start write to etcd ops %+v", ops)
+
 	_, err = c.etcdClient.Txn(ctx).
 		Then(ops...).
 		Commit()
+
+	log.Printf("end write to etcd ops %+v", ops)
 
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
