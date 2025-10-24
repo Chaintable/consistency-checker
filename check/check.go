@@ -57,8 +57,9 @@ func NewChecker(config *config.Config) (*Checker, error) {
 	}
 
 	etcdClient, err := clientv3.New(clientv3.Config{
-		Endpoints:   config.EtcdEndpoints,
-		DialTimeout: 5 * time.Second,
+		Endpoints:       config.EtcdEndpoints,
+		DialTimeout:     5 * time.Second,
+		MaxUnaryRetries: 10,
 	})
 	if err != nil {
 		log.Printf("create etcd client error %+v", err)
