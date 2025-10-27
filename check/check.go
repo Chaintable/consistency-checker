@@ -346,15 +346,21 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
 
 	for _, change := range replicaStateChange.ReplicaStates {
-		if change.ShouldWrite {
+		if change.ChangeType != nodes.NoChange {
 			nodestr, err := json.Marshal(&change.Node)
 			if err != nil {
 				return err
 			}
+			nodeKey := fmt.Sprintf("%d/nodes/%s_%d", c.confg.ChainID, change.Address, change.Port)
 			if change.Node.Lease == 0 {
-				return fmt.Errorf(change.Address + " lease is 0")
+				if change.ChangeType == nodes.DelNode {
+					ops = append(ops, clientv3.OpDelete(nodeKey))
+				} else {
+					ops = append(ops, clientv3.OpPut(nodeKey, string(nodestr)))
+				}
+			} else {
+				ops = append(ops, clientv3.OpPut(nodeKey, string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
 			}
-			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/nodes/%s_%d", c.confg.ChainID, change.Address, change.Port), string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
 		}
 	}
 
