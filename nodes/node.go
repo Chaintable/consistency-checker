@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+const (
+	NoChange = 0 + iota
+	UpdateNode
+	DelNode
+)
+
 type Node struct {
 	StateType uint64 `json:"stateType"` // 1 latest, 2 delay, 3 offline
 	Address   string `json:"address"`   //
@@ -23,7 +29,7 @@ type Node struct {
 type NodeWithHeight struct {
 	Node
 	LatestBlockNumber uint64
-	ShouldWrite       bool
+	ChangeType        int
 }
 
 type JsonRpcReq struct {
@@ -102,7 +108,7 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 
 func (node *Node) Check(kafkaLatestBlockNumber uint64) NodeWithHeight {
 	latestBlockNumber, err := node.EthBlockNumber(10 * time.Millisecond)
-	nodeWithHeight := NodeWithHeight{Node: *node, LatestBlockNumber: latestBlockNumber}
+	nodeWithHeight := NodeWithHeight{Node: *node, LatestBlockNumber: latestBlockNumber, ChangeType: NoChange}
 	if err != nil {
 		log.Printf("node %s:%d check failed: %v\n", node.Address, node.Port, err)
 		nodeWithHeight.StateType = 3
@@ -112,7 +118,11 @@ func (node *Node) Check(kafkaLatestBlockNumber uint64) NodeWithHeight {
 		nodeWithHeight.StateType = 2
 	}
 	if node.StateType != nodeWithHeight.StateType {
-		nodeWithHeight.ShouldWrite = true
+		if nodeWithHeight.StateType == 3 && node.Lease == 0 {
+			nodeWithHeight.ChangeType = DelNode
+		} else {
+			nodeWithHeight.ChangeType = UpdateNode
+		}
 	}
 	return nodeWithHeight
 }
