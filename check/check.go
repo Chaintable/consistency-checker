@@ -41,7 +41,9 @@ type Checker struct {
 	latestMsgOffset                    int64
 	// 副本80%高度
 	ReplicaLatestBlockNumber uint64
-	quit                     chan struct{}
+	// 上次写入etcd的LatestBlockNumber
+	lastWrittenBlockNumber uint64
+	quit                   chan struct{}
 }
 
 func NewChecker(config *config.Config) (*Checker, error) {
@@ -328,22 +330,31 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 }
 
 func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replicaStateChange *ReplicaStateChangeNotification) error {
+	var err error
 	ops := make([]clientv3.Op, 0)
 
-	type LastBlockBumber struct {
-		LatestBlockNumber *hexutil.Big `json:"latestBlockNumber"`
-	}
+	// 只在LatestBlockNumber变化时写入etcd
+	if replicaStateChange.LatestBlockNumber != nil {
+		currentBlockNumber := uint64(replicaStateChange.LatestBlockNumber.ToInt().Int64())
+		if currentBlockNumber != c.lastWrittenBlockNumber {
+			type LastBlockBumber struct {
+				LatestBlockNumber *hexutil.Big `json:"latestBlockNumber"`
+			}
 
-	lastHeight := LastBlockBumber{
-		LatestBlockNumber: replicaStateChange.LatestBlockNumber,
-	}
+			lastHeight := LastBlockBumber{
+				LatestBlockNumber: replicaStateChange.LatestBlockNumber,
+			}
 
-	lastHeightstr, err := json.Marshal(&lastHeight)
-	if err != nil {
-		return err
-	}
+			var lastHeightstr []byte
+			lastHeightstr, err = json.Marshal(&lastHeight)
+			if err != nil {
+				return err
+			}
 
-	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
+			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
+			c.lastWrittenBlockNumber = currentBlockNumber
+		}
+	}
 
 	for _, change := range replicaStateChange.ReplicaStates {
 		if change.ChangeType != nodes.NoChange {
@@ -362,6 +373,11 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 				ops = append(ops, clientv3.OpPut(nodeKey, string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
 			}
 		}
+	}
+
+	// 如果ops为空，无需提交事务
+	if len(ops) == 0 {
+		return nil
 	}
 
 	timeout := time.Duration(c.confg.EtcdWriteTimeout) * time.Millisecond
@@ -524,7 +540,10 @@ func (c *Checker) Run() {
 		case <-c.quit:
 			goto shutdown
 		default:
-			msg, err := c.innerNewBlockReader.FetchMessage(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.confg.MsgWaitTimeout)*time.Millisecond)
+			msg, err := c.innerNewBlockReader.FetchMessage(ctx)
+			cancel()
+
 			if err != nil {
 				log.Printf("fetch message error %+v", err)
 				time.Sleep(1 * time.Second)
