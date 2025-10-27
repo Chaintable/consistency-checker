@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Chaintable/consistency-checker/metrics"
@@ -31,6 +32,7 @@ import (
 )
 
 type Checker struct {
+	sync.Mutex
 	innerNewBlockReader                *kafka.Reader
 	outerNewBlockWriter                *kafka.Writer
 	outerS3Reader                      *s3.Client
@@ -297,9 +299,15 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateCh
 		if replicaStateChange != nil {
 			return replicaStateChange, nil
 		}
-		time.Sleep(time.Duration(c.confg.CheckInterval) * time.Millisecond)
+		time.Sleep(time.Duration(c.confg.CheckRpcInterval) * time.Millisecond)
 	}
 	return nil, fmt.Errorf("check many times but not ready: %v", err)
+}
+
+func (c *Checker) CheckAndNotifyEtcd() bool {
+	c.Lock()
+	defer c.Unlock()
+	return c.checkAndNotify(c.ReplicaLatestBlockNumber)
 }
 
 func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
@@ -430,6 +438,8 @@ func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
 }
 
 func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
+	c.Lock()
+	defer c.Unlock()
 	// 0. 消息校验
 	if !c.msgCheck(blockNotice) {
 		log.Printf("msg check error")
@@ -524,8 +534,16 @@ func (c *Checker) Run() {
 		case <-c.quit:
 			goto shutdown
 		default:
-			msg, err := c.innerNewBlockReader.FetchMessage(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.confg.CheckInterval)*time.Millisecond)
+			msg, err := c.innerNewBlockReader.FetchMessage(ctx)
+			cancel()
+
 			if err != nil {
+				if err == context.DeadlineExceeded {
+					// 超时，执行定期节点状态检查
+					c.CheckAndNotifyEtcd()
+					continue
+				}
 				log.Printf("fetch message error %+v", err)
 				time.Sleep(1 * time.Second)
 				continue
