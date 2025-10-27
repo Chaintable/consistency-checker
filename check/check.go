@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Chaintable/consistency-checker/metrics"
@@ -31,6 +32,7 @@ import (
 )
 
 type Checker struct {
+	sync.Mutex
 	innerNewBlockReader                *kafka.Reader
 	outerNewBlockWriter                *kafka.Writer
 	outerS3Reader                      *s3.Client
@@ -41,7 +43,9 @@ type Checker struct {
 	latestMsgOffset                    int64
 	// 副本80%高度
 	ReplicaLatestBlockNumber uint64
-	quit                     chan struct{}
+	// 上次写入etcd的LatestBlockNumber
+	lastWrittenBlockNumber uint64
+	quit                   chan struct{}
 }
 
 func NewChecker(config *config.Config) (*Checker, error) {
@@ -302,6 +306,12 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateCh
 	return nil, fmt.Errorf("check many times but not ready: %v", err)
 }
 
+func (c *Checker) CheckAndNotifyEtcd() bool {
+	c.Lock()
+	defer c.Unlock()
+	return c.checkAndNotify(c.ReplicaLatestBlockNumber)
+}
+
 func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	// 如果副本高度大于kafka最新高度，直接返回(一致性节点后上线)
 	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber && time.Since(c.latestWriteEtcd) < 1*time.Second {
@@ -328,22 +338,31 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 }
 
 func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replicaStateChange *ReplicaStateChangeNotification) error {
+	var err error
 	ops := make([]clientv3.Op, 0)
 
-	type LastBlockBumber struct {
-		LatestBlockNumber *hexutil.Big `json:"latestBlockNumber"`
-	}
+	// 只在LatestBlockNumber变化时写入etcd
+	if replicaStateChange.LatestBlockNumber != nil {
+		currentBlockNumber := uint64(replicaStateChange.LatestBlockNumber.ToInt().Int64())
+		if currentBlockNumber != c.lastWrittenBlockNumber {
+			type LastBlockBumber struct {
+				LatestBlockNumber *hexutil.Big `json:"latestBlockNumber"`
+			}
 
-	lastHeight := LastBlockBumber{
-		LatestBlockNumber: replicaStateChange.LatestBlockNumber,
-	}
+			lastHeight := LastBlockBumber{
+				LatestBlockNumber: replicaStateChange.LatestBlockNumber,
+			}
 
-	lastHeightstr, err := json.Marshal(&lastHeight)
-	if err != nil {
-		return err
-	}
+			var lastHeightstr []byte
+			lastHeightstr, err = json.Marshal(&lastHeight)
+			if err != nil {
+				return err
+			}
 
-	ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
+			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
+			c.lastWrittenBlockNumber = currentBlockNumber
+		}
+	}
 
 	for _, change := range replicaStateChange.ReplicaStates {
 		if change.ChangeType != nodes.NoChange {
@@ -362,6 +381,11 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 				ops = append(ops, clientv3.OpPut(nodeKey, string(nodestr), clientv3.WithLease(clientv3.LeaseID(change.Node.Lease))))
 			}
 		}
+	}
+
+	// 如果ops为空，无需提交事务
+	if len(ops) == 0 {
+		return nil
 	}
 
 	timeout := time.Duration(c.confg.EtcdWriteTimeout) * time.Millisecond
@@ -430,6 +454,8 @@ func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
 }
 
 func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
+	c.Lock()
+	defer c.Unlock()
 	// 0. 消息校验
 	if !c.msgCheck(blockNotice) {
 		log.Printf("msg check error")
@@ -524,8 +550,16 @@ func (c *Checker) Run() {
 		case <-c.quit:
 			goto shutdown
 		default:
-			msg, err := c.innerNewBlockReader.FetchMessage(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.confg.MsgWaitTimeout)*time.Millisecond)
+			msg, err := c.innerNewBlockReader.FetchMessage(ctx)
+			cancel()
+
 			if err != nil {
+				if err == context.DeadlineExceeded {
+					// 超时，执行定期节点状态检查
+					c.CheckAndNotifyEtcd()
+					continue
+				}
 				log.Printf("fetch message error %+v", err)
 				time.Sleep(1 * time.Second)
 				continue
