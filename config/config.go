@@ -12,6 +12,7 @@ type Config struct {
 	ReadyRatio           float64  `yaml:"ready_ratio"`              // 副本节点准备好的比例，达到后推送kafka
 	CheckNum             int      `yaml:"check_num"`                // 每次得知block更新后，check副本节点的次数
 	CheckInterval        int      `yaml:"check_interval_ms"`        // 每次check副本节点的间隔
+	RpcNodeTimeout       int      `yaml:"rpc_node_timeout_ms"`      // 每次check单副本节点RPC的超时时间
 	MsgWaitTimeout       int      `yaml:"msg_wait_timeout"`         // 每次check单副本节点RPC的间隔
 	ChainID              int64    `yaml:"chain_id"`                 // 链ID
 	ConsistencyDBPath    string   `yaml:"consistency_db_path"`      // 一致性检查的数据库路径
@@ -31,6 +32,7 @@ var defaultConfig = Config{
 	Listen:           ":8663",
 	ReadyRatio:       0.8,
 	CheckInterval:    20,
+	RpcNodeTimeout:   50,
 	MsgWaitTimeout:   5000,
 	EtcdWriteTimeout: 5000, // 5 seconds default
 }
