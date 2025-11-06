@@ -132,7 +132,7 @@ func (m *RWMap) GetAll() []Node {
 	return result
 }
 
-func (m *RWMap) CheckAll(kafkaLatestBlockNumber uint64) []NodeWithHeight {
+func (m *RWMap) CheckAll(kafkaLatestBlockNumber uint64, timeout time.Duration) []NodeWithHeight {
 	nodes := m.GetAll()
 	result := make([]NodeWithHeight, 0)
 	lock := sync.Mutex{}
@@ -143,7 +143,7 @@ func (m *RWMap) CheckAll(kafkaLatestBlockNumber uint64) []NodeWithHeight {
 		wg.Add(1)
 		go func(node Node) {
 			defer wg.Done()
-			state := node.Check(kafkaLatestBlockNumber)
+			state := node.Check(kafkaLatestBlockNumber, timeout)
 			lock.Lock()
 			result = append(result, state)
 			lock.Unlock()

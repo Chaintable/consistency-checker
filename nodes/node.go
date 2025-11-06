@@ -106,8 +106,8 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 	return uint64(blockNum), nil
 }
 
-func (node *Node) Check(kafkaLatestBlockNumber uint64) NodeWithHeight {
-	latestBlockNumber, err := node.EthBlockNumber(10 * time.Millisecond)
+func (node *Node) Check(kafkaLatestBlockNumber uint64, timeout time.Duration) NodeWithHeight {
+	latestBlockNumber, err := node.EthBlockNumber(timeout)
 	nodeWithHeight := NodeWithHeight{Node: *node, LatestBlockNumber: latestBlockNumber, ChangeType: NoChange}
 	if err != nil {
 		log.Printf("node %s:%d check failed: %v\n", node.Address, node.Port, err)

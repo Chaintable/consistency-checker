@@ -37,7 +37,7 @@ type Checker struct {
 	outerNewBlockWriter                *kafka.Writer
 	outerS3Reader                      *s3.Client
 	etcdClient                         *clientv3.Client
-	confg                              *config.Config
+	config                             *config.Config
 	latestWriteEtcd                    time.Time
 	latestOuterBlockChangeNotification *types.OuterBlockChangeNotification
 	latestMsgOffset                    int64
@@ -96,7 +96,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		outerS3Reader:                      innerS3Reader,
 		outerNewBlockWriter:                util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
 		etcdClient:                         etcdClient,
-		confg:                              config,
+		config:                             config,
 		latestOuterBlockChangeNotification: latestOuterBlockChangeNotification,
 		quit:                               make(chan struct{}),
 	}, nil
@@ -109,11 +109,11 @@ func (c *Checker) Close() {
 }
 
 func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error) {
-	s3Key := fmt.Sprintf("%d/%d/%s", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	s3Key := fmt.Sprintf("%d/%d/%s", c.config.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
 	obj, err := c.outerS3Reader.GetObject(
 		context.Background(),
 		&s3.GetObjectInput{
-			Bucket: &c.confg.OuterS3Bucket,
+			Bucket: &c.config.OuterS3Bucket,
 			Key:    &s3Key,
 		},
 	)
@@ -157,7 +157,7 @@ func (c *Checker) getValidationHashMany(newBlocks []types.BlockContext) ([]int64
 }
 
 func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, blockValidation int64) error {
-	s3Key := fmt.Sprintf("%d/%d/%s", c.confg.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	s3Key := fmt.Sprintf("%d/%d/%s", c.config.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
 	validation := types.BlockValidation{
 		ValidationHash: blockValidation,
 		IsFork:         true,
@@ -167,7 +167,7 @@ func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, blockValidation int
 		return nil
 	}
 	params := &s3.PutObjectInput{
-		Bucket: &c.confg.OuterS3Bucket,
+		Bucket: &c.config.OuterS3Bucket,
 		Key:    &s3Key,
 		Body:   bytes.NewReader(data),
 	}
@@ -197,9 +197,9 @@ func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) error {
 func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) {
 	for _, block := range newBlocks {
 		// 列出该高度下的所有区块
-		prefix := fmt.Sprintf("%d/%d/", c.confg.ChainID, block.BlockNumber)
+		prefix := fmt.Sprintf("%d/%d/", c.config.ChainID, block.BlockNumber)
 		listParams := &s3.ListObjectsV2Input{
-			Bucket: &c.confg.OuterS3Bucket,
+			Bucket: &c.config.OuterS3Bucket,
 			Prefix: &prefix,
 		}
 
@@ -262,7 +262,7 @@ type ReplicaStateChangeNotification struct {
 }
 
 func (c *Checker) check(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error) {
-	nodeStates := nodes.NodeMap.CheckAll(kafkaLatestBlockNumber)
+	nodeStates := nodes.NodeMap.CheckAll(kafkaLatestBlockNumber, time.Duration(c.config.RpcNodeTimeout)*time.Millisecond)
 	if len(nodeStates) == 0 {
 		return nil, fmt.Errorf("no node")
 	}
@@ -274,7 +274,7 @@ func (c *Checker) check(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotif
 	}
 	// latestBlockNumber 是所有ready节点中，高度最低的节点的高度
 	latestBlockNumber := math.MaxInt64
-	if float64(readyNodes)/float64(len(nodeStates)) >= c.confg.ReadyRatio {
+	if float64(readyNodes)/float64(len(nodeStates)) >= c.config.ReadyRatio {
 		for _, nodeState := range nodeStates {
 			if nodeState.StateType == 1 {
 				if latestBlockNumber > int(nodeState.LatestBlockNumber) {
@@ -293,7 +293,7 @@ func (c *Checker) check(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotif
 func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error) {
 	var err error
 	var replicaStateChange *ReplicaStateChangeNotification
-	for i := 0; i < c.confg.CheckNum; i++ {
+	for i := 0; i < c.config.CheckNum; i++ {
 		replicaStateChange, err = c.check(kafkaLatestBlockNumber)
 		if err != nil {
 			log.Printf("check error %+v", err)
@@ -301,7 +301,7 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateCh
 		if replicaStateChange != nil {
 			return replicaStateChange, nil
 		}
-		time.Sleep(time.Duration(c.confg.CheckInterval) * time.Millisecond)
+		time.Sleep(time.Duration(c.config.CheckInterval) * time.Millisecond)
 	}
 	return nil, fmt.Errorf("check many times but not ready: %v", err)
 }
@@ -359,7 +359,7 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 				return err
 			}
 
-			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.confg.ChainID), string(lastHeightstr)))
+			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.config.ChainID), string(lastHeightstr)))
 			c.lastWrittenBlockNumber = currentBlockNumber
 		}
 	}
@@ -370,7 +370,7 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 			if err != nil {
 				return err
 			}
-			nodeKey := fmt.Sprintf("%d/nodes/%s_%d", c.confg.ChainID, change.Address, change.Port)
+			nodeKey := fmt.Sprintf("%d/nodes/%s_%d", c.config.ChainID, change.Address, change.Port)
 			if change.Node.Lease == 0 {
 				if change.ChangeType == nodes.DelNode {
 					ops = append(ops, clientv3.OpDelete(nodeKey))
@@ -388,7 +388,7 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 		return nil
 	}
 
-	timeout := time.Duration(c.confg.EtcdWriteTimeout) * time.Millisecond
+	timeout := time.Duration(c.config.EtcdWriteTimeout) * time.Millisecond
 	if timeout == 0 {
 		timeout = 5 * time.Second
 	}
@@ -510,7 +510,7 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 		b := &types.OuterBlockChangeNotification{
 			BlockNumber: block.BlockNumber,
 			Hash:        block.Hash,
-			ChainID:     c.confg.ChainID,
+			ChainID:     c.config.ChainID,
 			Timestamp:   block.Timestamp,
 			IsFork:      true,
 		}
@@ -530,7 +530,7 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 		b := &types.OuterBlockChangeNotification{
 			BlockNumber: block.BlockNumber,
 			Hash:        block.Hash,
-			ChainID:     c.confg.ChainID,
+			ChainID:     c.config.ChainID,
 			Timestamp:   block.Timestamp,
 			IsFork:      false,
 		}
@@ -550,7 +550,7 @@ func (c *Checker) Run() {
 		case <-c.quit:
 			goto shutdown
 		default:
-			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.confg.MsgWaitTimeout)*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.config.MsgWaitTimeout)*time.Millisecond)
 			msg, err := c.innerNewBlockReader.FetchMessage(ctx)
 			cancel()
 
