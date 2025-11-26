@@ -54,6 +54,9 @@ func NewConsistencyDB(dbDir string) (*ConsistencyDB, error) {
 }
 
 func OpenConsistencyDB(dbDir string) error {
+	if DB != nil {
+		return nil
+	}
 	db, err := NewConsistencyDB(dbDir)
 	if err != nil {
 		return err

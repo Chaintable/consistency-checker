@@ -25,6 +25,7 @@ type RWMap struct {
 	watchCancel context.CancelFunc
 	etcdClient  *clientv3.Client
 	chainID     int64
+	version     string
 }
 
 func NewRWMap() *RWMap {
@@ -33,10 +34,21 @@ func NewRWMap() *RWMap {
 	}
 }
 
-func InitFromEtcd(chainID int64, cli *clientv3.Client) error {
+// getNodesPrefix 返回 etcd 中 nodes 的前缀路径
+// 版本模式：{chainID}/{version}/nodes/
+// 非版本模式：{chainID}/nodes/
+func (m *RWMap) getNodesPrefix() string {
+	if m.version != "" {
+		return fmt.Sprintf("%d/%s/nodes/", m.chainID, m.version)
+	}
+	return fmt.Sprintf("%d/nodes/", m.chainID)
+}
+
+func InitFromEtcd(chainID int64, version string, cli *clientv3.Client) error {
 	// Store etcd client and chainID for reconnection
 	NodeMap.etcdClient = cli
 	NodeMap.chainID = chainID
+	NodeMap.version = version
 
 	// Create a cancellable context for the watch
 	ctx, cancel := context.WithCancel(context.Background())
@@ -87,7 +99,7 @@ func (m *RWMap) Clear() {
 
 // reloadFromEtcd clears the map and reloads all data from etcd
 func (m *RWMap) reloadFromEtcd() (int64, error) {
-	prefix := fmt.Sprintf("%d/nodes/", m.chainID)
+	prefix := m.getNodesPrefix()
 	// Get all current data from etcd
 	resp, err := m.etcdClient.Get(context.TODO(), prefix, clientv3.WithPrefix())
 	if err != nil {
@@ -95,6 +107,9 @@ func (m *RWMap) reloadFromEtcd() (int64, error) {
 	}
 
 	log.Printf("Loading %d nodes from etcd after reconnection\n", len(resp.Kvs))
+
+	// Clear existing data to ensure consistency
+	m.Clear()
 
 	// Load all nodes
 	for _, kv := range resp.Kvs {
@@ -156,7 +171,7 @@ func (m *RWMap) CheckAll(kafkaLatestBlockNumber uint64, timeout time.Duration) [
 
 // watchEtcd watches etcd for changes with automatic reconnection on failure
 func (m *RWMap) watchEtcd(revision int64) {
-	prefix := fmt.Sprintf("%d/nodes/", m.chainID)
+	prefix := m.getNodesPrefix()
 	for {
 		select {
 		case <-m.watchCtx.Done():
@@ -174,7 +189,7 @@ func (m *RWMap) watchEtcd(revision int64) {
 		}
 		rch := m.etcdClient.Watch(m.watchCtx, prefix, watchOpts...)
 
-		err := m.processWatchEvents(rch, prefix)
+		newRevision, err := m.processWatchEvents(rch, prefix)
 
 		if err != nil {
 			// Check if it's a StopWatch case (context cancelled)
@@ -184,17 +199,50 @@ func (m *RWMap) watchEtcd(revision int64) {
 				return
 			default:
 				// Normal error, attempt to reconnect
-				time.Sleep(5 * time.Second)
 				log.Printf("Etcd watch error: %v. Attempting to reconnect...\n", err)
+				time.Sleep(5 * time.Second)
+
+				// 重新从 etcd 加载数据并获取最新的 revision
+				reloadRevision, reloadErr := m.reloadFromEtcd()
+				if reloadErr != nil {
+					log.Printf("Failed to reload from etcd: %v. Will retry with old revision.\n", reloadErr)
+					// 如果重新加载失败，继续使用当前 revision
+				} else {
+					// 使用重新加载后的 revision
+					revision = reloadRevision
+					log.Printf("Reloaded from etcd, new revision: %d\n", revision)
+				}
+			}
+		} else {
+			// 正常情况下，更新 revision 以便下次重连使用
+			if newRevision > revision {
+				revision = newRevision
 			}
 		}
 	}
 }
 
 // processWatchEvents processes events from the watch channel
-func (m *RWMap) processWatchEvents(rch clientv3.WatchChan, prefix string) error {
+// Returns the latest revision processed and any error encountered
+func (m *RWMap) processWatchEvents(rch clientv3.WatchChan, prefix string) (int64, error) {
+	var lastRevision int64
 	for wresp := range rch {
+		// Check for watch errors
+		if wresp.Err() != nil {
+			return lastRevision, fmt.Errorf("watch response error: %w", wresp.Err())
+		}
+
+		// Update last revision from response header
+		if wresp.Header.Revision > lastRevision {
+			lastRevision = wresp.Header.Revision
+		}
+
 		for _, ev := range wresp.Events {
+			// Update last revision from event
+			if ev.Kv.ModRevision > lastRevision {
+				lastRevision = ev.Kv.ModRevision
+			}
+
 			switch ev.Type {
 			case clientv3.EventTypePut:
 				var node Node
@@ -226,7 +274,7 @@ func (m *RWMap) processWatchEvents(rch clientv3.WatchChan, prefix string) error 
 	}
 
 	// Channel closed, likely due to network issue or etcd failure
-	return fmt.Errorf("watch channel closed")
+	return lastRevision, fmt.Errorf("watch channel closed")
 }
 
 // StopWatch gracefully stops the etcd watch

@@ -34,13 +34,18 @@ import (
 type Checker struct {
 	sync.Mutex
 	innerNewBlockReader                *kafka.Reader
-	outerNewBlockWriter                *kafka.Writer
+	outerVersionNewBlockWriter         *kafka.Writer
+	latestOuterBlockChangeNotification *types.OuterBlockChangeNotification
+	outerSingletonNewBlockWriter       *kafka.Writer
+	etcdLock                           *EtcdLock
 	outerS3Reader                      *s3.Client
 	etcdClient                         *clientv3.Client
 	config                             *config.Config
 	latestWriteEtcd                    time.Time
-	latestOuterBlockChangeNotification *types.OuterBlockChangeNotification
 	latestMsgOffset                    int64
+	isOuterSingletonAlign              bool
+	// 缓存的outer singleton block，避免重复创建kafka reader
+	cachedOuterSingleBlockChangeNotification *types.OuterBlockChangeNotification
 	// 副本80%高度
 	ReplicaLatestBlockNumber uint64
 	// 上次写入etcd的LatestBlockNumber
@@ -55,7 +60,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
-	innerS3Reader, err := util.NewS3Client(config.OuterS3Region)
+	outerS3Reader, err := util.NewS3Client(config.OuterS3Region)
 	if err != nil {
 		log.Printf("create s3 reader error %+v", err)
 		return nil, err
@@ -70,19 +75,11 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		return nil, err
 	}
 
-	err = nodes.InitFromEtcd(config.ChainID, etcdClient)
+	err = nodes.InitFromEtcd(config.ChainID, config.Version, etcdClient)
 	if err != nil {
 		log.Printf("init from etcd error %+v", err)
 		return nil, err
 	}
-
-	outerReader := util.NewKafkaReader(config.OuterBrokers, config.OuterNewBlockTopic, "")
-	latestOuterBlockChangeNotification, err := GetLastOuterBlockNotice(outerReader)
-	if err != nil {
-		log.Printf("get last outer block notice error %+v", err)
-		return nil, err
-	}
-	log.Printf("latestOuterBlockChangeNotification %+v", latestOuterBlockChangeNotification)
 
 	innerNewBlockReader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        config.InnerBrokers,
@@ -91,15 +88,176 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		CommitInterval: time.Duration(config.CommitInterval * int(time.Second)),
 	})
 
-	return &Checker{
-		innerNewBlockReader:                innerNewBlockReader,
-		outerS3Reader:                      innerS3Reader,
-		outerNewBlockWriter:                util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
-		etcdClient:                         etcdClient,
-		config:                             config,
-		latestOuterBlockChangeNotification: latestOuterBlockChangeNotification,
-		quit:                               make(chan struct{}),
-	}, nil
+	c := &Checker{
+		innerNewBlockReader:          innerNewBlockReader,
+		outerS3Reader:                outerS3Reader,
+		outerSingletonNewBlockWriter: util.NewKafkaWriter(config.OuterBrokers, config.OuterNewBlockTopic),
+		etcdClient:                   etcdClient,
+		config:                       config,
+		quit:                         make(chan struct{}),
+	}
+
+	// 版本模式：初始化版本相关的组件
+	if config.IsVersionMode() {
+		log.Printf("version mode enabled: version=%s, topic=%s", config.Version, config.OuterVersionNewBlockTopic)
+		c.outerVersionNewBlockWriter = util.NewKafkaWriter(config.OuterBrokers, config.OuterVersionNewBlockTopic)
+
+		latestOuterVersionBlockChangeNotification, err := GetLastOuterBlockNotice(util.NewKafkaReader(config.OuterBrokers, config.OuterVersionNewBlockTopic, ""))
+		if err != nil {
+			log.Printf("get last outer block notice error %+v", err)
+			return nil, err
+		}
+		log.Printf("latestOuterVersionBlockChangeNotification %+v", latestOuterVersionBlockChangeNotification)
+		c.latestOuterBlockChangeNotification = latestOuterVersionBlockChangeNotification
+
+		err = c.InitLeaderFromEtcd()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// 非版本模式：直接获取 OuterNewBlockTopic 的最新消息
+		log.Printf("legacy mode enabled: topic=%s", config.OuterNewBlockTopic)
+		latestOuterBlockChangeNotification, err := GetLastOuterBlockNotice(util.NewKafkaReader(config.OuterBrokers, config.OuterNewBlockTopic, ""))
+		if err != nil {
+			log.Printf("get last outer block notice error %+v", err)
+			return nil, err
+		}
+		log.Printf("latestOuterBlockChangeNotification %+v", latestOuterBlockChangeNotification)
+		c.latestOuterBlockChangeNotification = latestOuterBlockChangeNotification
+	}
+
+	return c, nil
+}
+
+func (c *Checker) ChangeToChainLeader() error {
+	c.Lock()
+	defer c.Unlock()
+	if c.etcdLock != nil {
+		return nil
+	}
+	etcdLock := NewLock(
+		fmt.Sprintf("%d/outer_block_notice", c.config.ChainID),
+		fmt.Sprintf("%d/version", c.config.ChainID),
+		c.config.Version,
+		c.etcdClient,
+		int64(c.config.EtcdLockTTL),
+		c.RevokeChainLeader,
+	)
+	acquired := etcdLock.Acquire()
+	if !acquired {
+		log.Printf("acquire etcd lock failed")
+		return fmt.Errorf("acquire etcd lock failed")
+	}
+	log.Printf("acquire etcd lock success")
+	c.etcdLock = etcdLock
+	return nil
+}
+
+func (c *Checker) RevokeChainLeader() {
+	c.Lock()
+	defer c.Unlock()
+	if c.etcdLock != nil {
+		c.etcdLock.Release()
+		log.Printf("release etcd lock success")
+		c.etcdLock = nil
+		c.isOuterSingletonAlign = false
+	}
+}
+
+func (c *Checker) InitLeaderFromEtcd() error {
+	outerVersionKey := fmt.Sprintf("%d/version", c.config.ChainID)
+
+	// 初始检查当前版本
+	resp, err := c.etcdClient.Get(context.Background(), outerVersionKey)
+	if err != nil {
+		log.Printf("get outer version from etcd error %+v", err)
+		return err
+	}
+
+	// 获取当前的 ModRevision，用于 watch 的起始点
+	var watchRevision int64
+	if len(resp.Kvs) > 0 {
+		watchRevision = resp.Kvs[0].ModRevision
+		etcdVersion := string(resp.Kvs[0].Value)
+		if etcdVersion == c.config.Version {
+			log.Printf("version matches, becoming leader: %s", c.config.Version)
+			err := c.ChangeToChainLeader()
+			if err != nil {
+				return err
+			}
+		} else {
+			log.Printf("version %s, leader version %s, not leader", c.config.Version, etcdVersion)
+		}
+	} else {
+		// key 不存在时，使用当前的 Header Revision
+		watchRevision = resp.Header.Revision
+		log.Printf("version key does not exist in etcd: %s", outerVersionKey)
+	}
+
+	// 启动 goroutine 监听 version key 的变化
+	go func() {
+		log.Printf("Starting watch for version key: %s from revision: %d", outerVersionKey, watchRevision)
+		// 从 ModRevision 开始监听，确保不会错过任何变更
+		watchChan := c.etcdClient.Watch(context.Background(), outerVersionKey, clientv3.WithRev(watchRevision))
+
+		for {
+			select {
+			case watchResp := <-watchChan:
+				if watchResp.Err() != nil {
+					log.Printf("Watch error for version key: %v", watchResp.Err())
+					// 发生错误时重新获取当前状态并重建 watch
+					time.Sleep(time.Second)
+					retryResp, err := c.etcdClient.Get(context.Background(), outerVersionKey)
+					if err != nil {
+						log.Printf("Failed to get version key after watch error: %v", err)
+						watchChan = c.etcdClient.Watch(context.Background(), outerVersionKey)
+					} else {
+						if len(retryResp.Kvs) > 0 {
+							watchRevision = retryResp.Kvs[0].ModRevision
+						} else {
+							watchRevision = retryResp.Header.Revision
+						}
+						watchChan = c.etcdClient.Watch(context.Background(), outerVersionKey, clientv3.WithRev(watchRevision))
+					}
+					continue
+				}
+
+				// 处理 watch 事件
+				for _, event := range watchResp.Events {
+					switch event.Type {
+					case clientv3.EventTypePut:
+						newVersion := string(event.Kv.Value)
+						log.Printf("Version key updated: %s -> %s (revision: %d)", outerVersionKey, newVersion, event.Kv.ModRevision)
+
+						if newVersion == c.config.Version {
+							// 版本匹配，尝试成为 leader
+							log.Printf("Version matches, attempting to become leader")
+							err := c.ChangeToChainLeader()
+							if err != nil {
+								log.Printf("Failed to become chain leader: %v", err)
+							}
+						} else {
+							// 版本不匹配，放弃 leader 身份
+							log.Printf("Version mismatch (expected: %s, got: %s), revoking leader",
+								c.config.Version, newVersion)
+							c.RevokeChainLeader()
+						}
+
+					case clientv3.EventTypeDelete:
+						// version key 被删除，放弃 leader 身份
+						log.Printf("Version key deleted: %s (revision: %d), revoking leader", outerVersionKey, event.Kv.ModRevision)
+						c.RevokeChainLeader()
+					}
+				}
+
+			case <-c.quit:
+				log.Printf("Stopping version key watch for: %s", outerVersionKey)
+				return
+			}
+		}
+	}()
+
+	return nil
 }
 
 func (c *Checker) Close() {
@@ -108,8 +266,118 @@ func (c *Checker) Close() {
 	db.DB.Close()
 }
 
+func (c *Checker) getVersionBlockByHash(hash common.Hash) (*types.BlockContext, error) {
+	s3Key := fmt.Sprintf("%d/%s/%s/block", c.config.ChainID, c.config.Version, hash.String())
+	obj, err := c.outerS3Reader.GetObject(
+		context.Background(),
+		&s3.GetObjectInput{
+			Bucket: &c.config.OuterS3Bucket,
+			Key:    &s3Key,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer obj.Body.Close()
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(obj.Body)
+	header := types.Header{}
+	err = util.DecodeFromGzipJson(buf.Bytes(), &header)
+	if err != nil {
+		return nil, err
+	}
+	blockCtx := &types.BlockContext{
+		BlockNumber: header.Number.ToInt().Uint64(),
+		Hash:        hash,
+		ParentHash:  header.ParentHash,
+		Timestamp:   uint64(header.Timestamp),
+	}
+	return blockCtx, nil
+}
+
+// GetCommonAncestor 查找两个区块的共同祖先
+// 返回: (共同祖先, 本地祖先列表, 远程祖先列表, 错误)
+func (c *Checker) GetCommonAncestor(localBlock, remoteBlock *types.BlockContext) (*types.BlockContext, []*types.BlockContext, []*types.BlockContext, error) {
+	var localAncestors []*types.BlockContext
+	var remoteAncestors []*types.BlockContext
+
+	// 如果 local_block.hash == remote_block.parent_hash，说明 remote 是 local 的直接子节点
+	if localBlock.Hash == remoteBlock.ParentHash {
+		remoteAncestors = append(remoteAncestors, remoteBlock)
+		return localBlock, localAncestors, remoteAncestors, nil
+	}
+
+	// 创建副本以避免修改原始数据
+	currentLocal := *localBlock
+	currentRemote := *remoteBlock
+
+	// 如果 remote_block 的高度大于 local_block，先让 remote_block 往回走，直到两者高度相同
+	for currentRemote.BlockNumber > currentLocal.BlockNumber {
+		remoteAncestors = append(remoteAncestors, &types.BlockContext{
+			BlockNumber: currentRemote.BlockNumber,
+			Hash:        currentRemote.Hash,
+			ParentHash:  currentRemote.ParentHash,
+			Timestamp:   currentRemote.Timestamp,
+		})
+
+		parentBlock, err := c.getVersionBlockByHash(currentRemote.ParentHash)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to get remote parent block %s: %w", currentRemote.ParentHash.String(), err)
+		}
+		currentRemote = *parentBlock
+	}
+
+	// 两者同时往回走，直到找到相同的 hash（共同祖先）
+	for currentLocal.Hash != currentRemote.Hash {
+		localAncestors = append(localAncestors, &types.BlockContext{
+			BlockNumber: currentLocal.BlockNumber,
+			Hash:        currentLocal.Hash,
+			ParentHash:  currentLocal.ParentHash,
+			Timestamp:   currentLocal.Timestamp,
+		})
+
+		localParent, err := c.getVersionBlockByHash(currentLocal.ParentHash)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to get local parent block %s: %w", currentLocal.ParentHash.String(), err)
+		}
+		currentLocal = *localParent
+
+		remoteAncestors = append(remoteAncestors, &types.BlockContext{
+			BlockNumber: currentRemote.BlockNumber,
+			Hash:        currentRemote.Hash,
+			ParentHash:  currentRemote.ParentHash,
+			Timestamp:   currentRemote.Timestamp,
+		})
+
+		remoteParent, err := c.getVersionBlockByHash(currentRemote.ParentHash)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to get remote parent block %s: %w", currentRemote.ParentHash.String(), err)
+		}
+		currentRemote = *remoteParent
+	}
+
+	// 共同祖先
+	commonAncestor := &types.BlockContext{
+		BlockNumber: currentLocal.BlockNumber,
+		Hash:        currentLocal.Hash,
+		ParentHash:  currentLocal.ParentHash,
+		Timestamp:   currentLocal.Timestamp,
+	}
+
+	// 反转祖先列表，使其按照从祖先到当前的顺序排列
+	slices.Reverse(localAncestors)
+	slices.Reverse(remoteAncestors)
+
+	return commonAncestor, localAncestors, remoteAncestors, nil
+}
+
 func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error) {
-	s3Key := fmt.Sprintf("%d/%d/%s", c.config.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	var s3Key string
+	if c.config.IsVersionMode() {
+		s3Key = fmt.Sprintf("%d/%s/%d/%s", c.config.ChainID, c.config.Version, blockCtx.BlockNumber, blockCtx.Hash.String())
+	} else {
+		s3Key = fmt.Sprintf("%d/%d/%s", c.config.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	}
 	obj, err := c.outerS3Reader.GetObject(
 		context.Background(),
 		&s3.GetObjectInput{
@@ -157,7 +425,12 @@ func (c *Checker) getValidationHashMany(newBlocks []types.BlockContext) ([]int64
 }
 
 func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, blockValidation int64) error {
-	s3Key := fmt.Sprintf("%d/%d/%s", c.config.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	var s3Key string
+	if c.config.IsVersionMode() {
+		s3Key = fmt.Sprintf("%d/%s/%d/%s", c.config.ChainID, c.config.Version, blockCtx.BlockNumber, blockCtx.Hash.String())
+	} else {
+		s3Key = fmt.Sprintf("%d/%d/%s", c.config.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
+	}
 	validation := types.BlockValidation{
 		ValidationHash: blockValidation,
 		IsFork:         true,
@@ -197,7 +470,12 @@ func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) error {
 func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) {
 	for _, block := range newBlocks {
 		// 列出该高度下的所有区块
-		prefix := fmt.Sprintf("%d/%d/", c.config.ChainID, block.BlockNumber)
+		var prefix string
+		if c.config.IsVersionMode() {
+			prefix = fmt.Sprintf("%d/%s/%d/", c.config.ChainID, c.config.Version, block.BlockNumber)
+		} else {
+			prefix = fmt.Sprintf("%d/%d/", c.config.ChainID, block.BlockNumber)
+		}
 		listParams := &s3.ListObjectsV2Input{
 			Bucket: &c.config.OuterS3Bucket,
 			Prefix: &prefix,
@@ -216,13 +494,21 @@ func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) 
 			}
 
 			// 从key中提取hash
-			// key格式: {chainID}/{blockNumber}/{hash}
+			// 版本模式 key格式: {chainID}/{version}/{blockNumber}/{hash}
+			// 非版本模式 key格式: {chainID}/{blockNumber}/{hash}
 			keyParts := bytes.Split([]byte(*obj.Key), []byte("/"))
-			if len(keyParts) != 3 {
-				continue
+			var existingHashStr string
+			if c.config.IsVersionMode() {
+				if len(keyParts) != 4 {
+					continue
+				}
+				existingHashStr = string(keyParts[3])
+			} else {
+				if len(keyParts) != 3 {
+					continue
+				}
+				existingHashStr = string(keyParts[2])
 			}
-
-			existingHashStr := string(keyParts[2])
 
 			// 如果hash不同，说明是fork，需要重写
 			if !strings.EqualFold(existingHashStr, block.Hash.String()) {
@@ -359,7 +645,13 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 				return err
 			}
 
-			ops = append(ops, clientv3.OpPut(fmt.Sprintf("%d/lastBlockNumber", c.config.ChainID), string(lastHeightstr)))
+			var lastBlockNumberKey string
+			if c.config.IsVersionMode() {
+				lastBlockNumberKey = fmt.Sprintf("%d/%s/lastBlockNumber", c.config.ChainID, c.config.Version)
+			} else {
+				lastBlockNumberKey = fmt.Sprintf("%d/lastBlockNumber", c.config.ChainID)
+			}
+			ops = append(ops, clientv3.OpPut(lastBlockNumberKey, string(lastHeightstr)))
 			c.lastWrittenBlockNumber = currentBlockNumber
 		}
 	}
@@ -370,7 +662,12 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 			if err != nil {
 				return err
 			}
-			nodeKey := fmt.Sprintf("%d/nodes/%s_%d", c.config.ChainID, change.Address, change.Port)
+			var nodeKey string
+			if c.config.IsVersionMode() {
+				nodeKey = fmt.Sprintf("%d/%s/nodes/%s_%d", c.config.ChainID, c.config.Version, change.Address, change.Port)
+			} else {
+				nodeKey = fmt.Sprintf("%d/nodes/%s_%d", c.config.ChainID, change.Address, change.Port)
+			}
 			if change.Node.Lease == 0 {
 				if change.ChangeType == nodes.DelNode {
 					ops = append(ops, clientv3.OpDelete(nodeKey))
@@ -436,6 +733,18 @@ func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
 	return true
 }
 
+func (c *Checker) isDuplicateBlockNotification(blockNotice *types.BlockChangeNotification) bool {
+	if c.latestOuterBlockChangeNotification != nil {
+		if len(blockNotice.DropBlocks) == 0 && len(blockNotice.NewBlocks) == 1 {
+			if blockNotice.NewBlocks[0].Hash == c.latestOuterBlockChangeNotification.Hash {
+				log.Printf("skip duplicate block notification: hash=%s", blockNotice.NewBlocks[0].Hash)
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
 	if c.latestOuterBlockChangeNotification != nil {
 		if len(blockNotice.DropBlocks) > 0 {
@@ -457,6 +766,9 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 	c.Lock()
 	defer c.Unlock()
 	// 0. 消息校验
+	if c.isDuplicateBlockNotification(blockNotice) {
+		return true
+	}
 	if !c.msgCheck(blockNotice) {
 		log.Printf("msg check error")
 		return false
@@ -502,7 +814,156 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 		log.Printf("write new block notice error")
 		return false
 	}
+
+	// 7. 对于从切换成leader的情况，进行topic align
+	if !c.AlignOuterSingleton() {
+		log.Printf("align outer singleton error")
+		return false
+	}
+
 	return true
+}
+
+// fetchLatestOuterSingleBlockNotice 获取最新的 outer singleton block 通知
+func (c *Checker) fetchLatestOuterSingleBlockNotice() (*types.OuterBlockChangeNotification, error) {
+	reader := util.NewKafkaReader(c.config.OuterBrokers, c.config.OuterNewBlockTopic, "")
+	defer reader.Close()
+	return GetLastOuterBlockNotice(reader)
+}
+
+func (c *Checker) AlignOuterSingleton() bool {
+	// 无需outer singleton对齐
+	if c.etcdLock == nil {
+		return true
+	}
+	// 已经对齐
+	if c.isOuterSingletonAlign {
+		return true
+	}
+	// 还没有outer消息
+	if c.latestOuterBlockChangeNotification == nil {
+		return true
+	}
+
+	// 使用缓存的 singleton block，避免重复创建 kafka reader
+	if c.cachedOuterSingleBlockChangeNotification == nil {
+		latestOuterSingleBlockChangeNotification, err := c.fetchLatestOuterSingleBlockNotice()
+		if err != nil {
+			log.Printf("get last outer singleton block notice error %+v", err)
+			return false
+		}
+		if latestOuterSingleBlockChangeNotification == nil {
+			c.isOuterSingletonAlign = true
+			return true
+		}
+		c.cachedOuterSingleBlockChangeNotification = latestOuterSingleBlockChangeNotification
+	}
+
+	if c.latestOuterBlockChangeNotification.BlockNumber < c.cachedOuterSingleBlockChangeNotification.BlockNumber {
+		return true
+	}
+
+	// align 前重新获取最新值
+	latestOuterSingleBlockChangeNotification, err := c.fetchLatestOuterSingleBlockNotice()
+	if err != nil {
+		log.Printf("get last outer singleton block notice error %+v", err)
+		return false
+	}
+	c.cachedOuterSingleBlockChangeNotification = latestOuterSingleBlockChangeNotification
+	err = c.align(c.latestOuterBlockChangeNotification, c.cachedOuterSingleBlockChangeNotification)
+	if err != nil {
+		log.Printf("align error %+v", err)
+		return false
+	}
+	c.isOuterSingletonAlign = true
+	c.cachedOuterSingleBlockChangeNotification = nil // 对齐成功后清除缓存
+	log.Printf("align success")
+	return true
+}
+
+func (c *Checker) align(latestOuterVersionBlockChangeNotification, latestOuterSingleBlockChangeNotification *types.OuterBlockChangeNotification) error {
+	if latestOuterVersionBlockChangeNotification.Hash == latestOuterSingleBlockChangeNotification.Hash {
+		return nil
+	}
+	block, err := db.DB.GetBlockInfoByNum(big.NewInt(int64(latestOuterSingleBlockChangeNotification.BlockNumber)))
+	if err != nil {
+		return fmt.Errorf("failed to get singleton block at height %d: %w", latestOuterSingleBlockChangeNotification.BlockNumber, err)
+	}
+	if block.ID == latestOuterSingleBlockChangeNotification.Hash {
+		// 顺序对齐：singleton 落后，追赶到 version 高度
+		for i := latestOuterSingleBlockChangeNotification.BlockNumber + 1; i <= latestOuterVersionBlockChangeNotification.BlockNumber; i++ {
+			block, err := db.DB.GetBlockInfoByNum(big.NewInt(int64(i)))
+			if err != nil {
+				return fmt.Errorf("failed to get block at height %d during alignment: %w", i, err)
+			}
+			b := &types.OuterBlockChangeNotification{
+				BlockNumber: block.Height,
+				Hash:        block.ID,
+				ChainID:     c.config.ChainID,
+				Timestamp:   uint64(time.Now().Unix()),
+				IsFork:      block.IsFork,
+			}
+			err = util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+			if err != nil {
+				return fmt.Errorf("failed to write block notice for height %d (hash: %s): %w", block.Height, block.ID.String(), err)
+			}
+		}
+		log.Printf("aligned singleton by fast forward from height %d to %d",
+			latestOuterSingleBlockChangeNotification.BlockNumber,
+			latestOuterVersionBlockChangeNotification.BlockNumber)
+	} else {
+		// fork - 需要找到共同祖先并重新发送区块
+		blockA, err := c.getVersionBlockByHash(latestOuterVersionBlockChangeNotification.Hash)
+		if err != nil {
+			return fmt.Errorf("failed to get version block by hash %s: %w", latestOuterVersionBlockChangeNotification.Hash.String(), err)
+		}
+		blockB, err := c.getVersionBlockByHash(latestOuterSingleBlockChangeNotification.Hash)
+		if err != nil {
+			return fmt.Errorf("failed to get singleton block by hash %s: %w", latestOuterSingleBlockChangeNotification.Hash.String(), err)
+		}
+
+		// 找到共同祖先
+		_, dropBlocks, newBlocks, err := c.GetCommonAncestor(blockB, blockA)
+		if err != nil {
+			return fmt.Errorf("failed to find common ancestor between singleton %s and version %s: %w",
+				latestOuterSingleBlockChangeNotification.Hash.String(),
+				latestOuterVersionBlockChangeNotification.Hash.String(),
+				err)
+		}
+
+		// write drop blocks
+		for i, block := range dropBlocks {
+			b := &types.OuterBlockChangeNotification{
+				BlockNumber: block.BlockNumber,
+				Hash:        block.Hash,
+				ChainID:     c.config.ChainID,
+				Timestamp:   block.Timestamp,
+				IsFork:      true,
+			}
+			err := util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+			if err != nil {
+				return fmt.Errorf("failed to write drop block notice %d/%d (height: %d, hash: %s): %w",
+					i+1, len(dropBlocks), block.BlockNumber, block.Hash.String(), err)
+			}
+		}
+
+		// write new blocks
+		for i, block := range newBlocks {
+			b := &types.OuterBlockChangeNotification{
+				BlockNumber: block.BlockNumber,
+				Hash:        block.Hash,
+				ChainID:     c.config.ChainID,
+				Timestamp:   block.Timestamp,
+				IsFork:      false,
+			}
+			err := util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+			if err != nil {
+				return fmt.Errorf("failed to write new block notice %d/%d (height: %d, hash: %s): %w",
+					i+1, len(newBlocks), block.BlockNumber, block.Hash.String(), err)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
@@ -514,10 +975,27 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 			Timestamp:   block.Timestamp,
 			IsFork:      true,
 		}
-		err := util.WriteOuterBlockNotice(c.outerNewBlockWriter, b)
-		if err != nil {
-			log.Printf("write drop block notice error %+v", err)
-			return false
+		// 版本模式：写入 version topic，并在 leader 时同步写入 singleton topic
+		if c.config.IsVersionMode() {
+			err := util.WriteOuterBlockNotice(c.outerVersionNewBlockWriter, b)
+			if err != nil {
+				log.Printf("write drop block notice error %+v", err)
+				return false
+			}
+			if c.etcdLock != nil && c.isOuterSingletonAlign {
+				err = util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+				if err != nil {
+					log.Printf("write drop block notice to singleton error %+v", err)
+					return false
+				}
+			}
+		} else {
+			// 非版本模式：直接写入 singleton topic
+			err := util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+			if err != nil {
+				log.Printf("write drop block notice error %+v", err)
+				return false
+			}
 		}
 	}
 	return true
@@ -534,10 +1012,27 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 			Timestamp:   block.Timestamp,
 			IsFork:      false,
 		}
-		err := util.WriteOuterBlockNotice(c.outerNewBlockWriter, b)
-		if err != nil {
-			log.Printf("write new block notice error %+v", err)
-			return false
+		// 版本模式：写入 version topic，并在 leader 时同步写入 singleton topic
+		if c.config.IsVersionMode() {
+			err := util.WriteOuterBlockNotice(c.outerVersionNewBlockWriter, b)
+			if err != nil {
+				log.Printf("write new block notice error %+v", err)
+				return false
+			}
+			if c.etcdLock != nil && c.isOuterSingletonAlign {
+				err = util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+				if err != nil {
+					log.Printf("write new block notice to singleton error %+v", err)
+					return false
+				}
+			}
+		} else {
+			// 非版本模式：直接写入 singleton topic
+			err := util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+			if err != nil {
+				log.Printf("write new block notice error %+v", err)
+				return false
+			}
 		}
 		c.latestOuterBlockChangeNotification = b
 	}
@@ -603,9 +1098,15 @@ func (c *Checker) Run() {
 
 shutdown:
 	c.innerNewBlockReader.Close()
-	c.outerNewBlockWriter.Close()
+	if c.outerVersionNewBlockWriter != nil {
+		c.outerVersionNewBlockWriter.Close()
+	}
+	c.outerSingletonNewBlockWriter.Close()
 	nodes.NodeMap.StopWatch()
 	c.etcdClient.Close()
+	if c.etcdLock != nil {
+		c.etcdLock.Release()
+	}
 }
 
 // 获取最后一个OuterBlockChangeNotification

@@ -31,6 +31,14 @@ func parseCmdlineAndLoadConfig() config.Config {
 		fileConfig.Listen = cmdlineConfig.Listen
 	}
 
+	if fileConfig.ChainID == 0 {
+		log.Fatalf("chain_id must be set in config file")
+	}
+
+	if (fileConfig.Version != "" && fileConfig.OuterVersionNewBlockTopic == "") || (fileConfig.Version == "" && fileConfig.OuterVersionNewBlockTopic != "") {
+		log.Fatalf("both version and outer_version_new_block_topic must be set or both must be empty")
+	}
+
 	return fileConfig
 }
 
