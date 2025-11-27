@@ -572,8 +572,13 @@ func (c *Checker) check(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotif
 			LatestBlockNumber: (*hexutil.Big)(big.NewInt(int64(latestBlockNumber))),
 			ReplicaStates:     nodeStates,
 		}, nil
+	} else {
+		log.Printf("ready nodes ratio %.2f below threshold %.2f", float64(readyNodes)/float64(len(nodeStates)), c.config.ReadyRatio)
+		return &ReplicaStateChangeNotification{
+			LatestBlockNumber: nil,
+			ReplicaStates:     nodeStates,
+		}, nil
 	}
-	return nil, nil
 }
 
 func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error) {
@@ -585,7 +590,12 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateCh
 			log.Printf("check error %+v", err)
 		}
 		if replicaStateChange != nil {
-			return replicaStateChange, nil
+			if replicaStateChange.LatestBlockNumber != nil {
+				return replicaStateChange, nil
+			}
+			if len(replicaStateChange.ReplicaStates) > 0 {
+				c.WriteReplicaStateChangeToEtcd(c.etcdClient, replicaStateChange)
+			}
 		}
 		time.Sleep(time.Duration(c.config.CheckInterval) * time.Millisecond)
 	}
