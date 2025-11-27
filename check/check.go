@@ -371,7 +371,7 @@ func (c *Checker) GetCommonAncestor(localBlock, remoteBlock *types.BlockContext)
 	return commonAncestor, localAncestors, remoteAncestors, nil
 }
 
-func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error) {
+func (c *Checker) getRawValidation(blockCtx *types.BlockContext) (*types.BlockValidation, error) {
 	var s3Key string
 	if c.config.IsVersionMode() {
 		s3Key = fmt.Sprintf("%d/%s/%d/%s", c.config.ChainID, c.config.Version, blockCtx.BlockNumber, blockCtx.Hash.String())
@@ -386,13 +386,21 @@ func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error)
 		},
 	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer obj.Body.Close()
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(obj.Body)
 	validation := types.BlockValidation{}
 	err = util.DecodeFromGzipJson(buf.Bytes(), &validation)
+	if err != nil {
+		return nil, err
+	}
+	return &validation, nil
+}
+
+func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error) {
+	validation, err := c.getRawValidation(blockCtx)
 	if err != nil {
 		return 0, err
 	}
@@ -535,6 +543,27 @@ func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) 
 				} else {
 					log.Printf("successfully marked block %s at height %d as fork",
 						existingHashStr, block.BlockNumber)
+				}
+			} else {
+				validation, err := c.getRawValidation(&block)
+				if err != nil {
+					log.Printf("get canonical block validation hash error: %+v", err)
+				}
+				if validation.IsFork {
+					validation.IsFork = false
+					data, err := util.EncodeToJsonGzip(&validation)
+					if err != nil {
+						continue
+					}
+					params := &s3.PutObjectInput{
+						Bucket: &c.config.OuterS3Bucket,
+						Key:    obj.Key,
+						Body:   bytes.NewReader(data),
+					}
+					_, err = c.outerS3Reader.PutObject(context.Background(), params)
+					if err != nil {
+						continue
+					}
 				}
 			}
 		}
