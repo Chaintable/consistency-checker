@@ -26,6 +26,17 @@ type Node struct {
 	Lease     int64  `json:"-"`        // 0: no lease, >0: lease time
 }
 
+// Equal 比较两个 Node 是否相等（不比较 Lease 字段）
+func (node *Node) Equal(other *Node) bool {
+	if other == nil {
+		return false
+	}
+	return node.StateType == other.StateType &&
+		node.Address == other.Address &&
+		node.Port == other.Port &&
+		node.NodeType == other.NodeType
+}
+
 type NodeWithHeight struct {
 	Node
 	LatestBlockNumber uint64

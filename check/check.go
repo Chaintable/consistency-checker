@@ -622,13 +622,10 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateCh
 			if replicaStateChange.LatestBlockNumber != nil {
 				return replicaStateChange, nil
 			}
-			if len(replicaStateChange.ReplicaStates) > 0 {
-				c.WriteReplicaStateChangeToEtcd(c.etcdClient, replicaStateChange)
-			}
 		}
 		time.Sleep(time.Duration(c.config.CheckInterval) * time.Millisecond)
 	}
-	return nil, fmt.Errorf("check many times but not ready: %v", err)
+	return replicaStateChange, fmt.Errorf("check many times but not ready: %v", err)
 }
 
 func (c *Checker) CheckAndNotifyEtcd() bool {
@@ -646,6 +643,9 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	replicaStateChange, err := c.checkWithReTry(kafkaLatestBlockNumber)
 	if err != nil {
 		log.Printf("check error %+v", err)
+		if replicaStateChange != nil {
+			c.RemoveOfflineNodesFromEtcd(c.etcdClient, replicaStateChange)
+		}
 		return false
 	}
 	if replicaStateChange.LatestBlockNumber != nil {
@@ -660,6 +660,46 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 		}
 	}
 	return true
+}
+
+func (c *Checker) RemoveOfflineNodesFromEtcd(writer *clientv3.Client, replicaStateChange *ReplicaStateChangeNotification) {
+	var err error
+	ops := make([]clientv3.Op, 0)
+	for _, change := range replicaStateChange.ReplicaStates {
+		if change.ChangeType == nodes.DelNode && change.Node.Lease == 0 {
+			var nodeKey string
+			if c.config.IsVersionMode() {
+				nodeKey = fmt.Sprintf("%d/%s/nodes/%s_%d", c.config.ChainID, c.config.Version, change.Address, change.Port)
+			} else {
+				nodeKey = fmt.Sprintf("%d/nodes/%s_%d", c.config.ChainID, change.Address, change.Port)
+			}
+			ops = append(ops, clientv3.OpDelete(nodeKey))
+			log.Printf("remove offline node from etcd: %s", nodeKey)
+		}
+	}
+	// 如果ops为空，无需提交事务
+	if len(ops) == 0 {
+		return
+	}
+
+	timeout := time.Duration(c.config.EtcdWriteTimeout) * time.Millisecond
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	_, err = c.etcdClient.Txn(ctx).
+		Then(ops...).
+		Commit()
+
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Printf("etcd write timeout: %v", err)
+		} else {
+			log.Printf("etcd delete error: %v", err)
+		}
+	}
 }
 
 func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replicaStateChange *ReplicaStateChangeNotification) error {

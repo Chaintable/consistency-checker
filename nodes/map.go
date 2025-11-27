@@ -76,9 +76,15 @@ func (m *RWMap) GetByIP(ip string) Node {
 }
 
 func (m *RWMap) SetByIP(ip string, node Node) {
-	log.Printf("add node: %s\n", ip)
 	m.lock.Lock()
 	defer m.lock.Unlock()
+	if oldNode, exists := m.m[ip]; exists {
+		if oldNode.Equal(&node) {
+			return
+		}
+	} else {
+		log.Printf("add node: %s\n", ip)
+	}
 	m.m[ip] = node
 }
 
