@@ -75,6 +75,7 @@ func (node *Node) EthBlockNumber(timeout time.Duration) (uint64, error) {
 	}
 	req.Header.Add("accept", "application/json")
 	req.Header.Add("content-type", "application/json")
+	req.Header.Add("x-skip-interceptor", "true")
 
 	ctx, cancel := context.WithTimeout(req.Context(), timeout)
 	defer cancel()
