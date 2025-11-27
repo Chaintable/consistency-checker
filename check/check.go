@@ -622,13 +622,10 @@ func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateCh
 			if replicaStateChange.LatestBlockNumber != nil {
 				return replicaStateChange, nil
 			}
-			if len(replicaStateChange.ReplicaStates) > 0 {
-				c.WriteReplicaStateChangeToEtcd(c.etcdClient, replicaStateChange)
-			}
 		}
 		time.Sleep(time.Duration(c.config.CheckInterval) * time.Millisecond)
 	}
-	return nil, fmt.Errorf("check many times but not ready: %v", err)
+	return replicaStateChange, fmt.Errorf("check many times but not ready: %v", err)
 }
 
 func (c *Checker) CheckAndNotifyEtcd() bool {
@@ -646,6 +643,9 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	replicaStateChange, err := c.checkWithReTry(kafkaLatestBlockNumber)
 	if err != nil {
 		log.Printf("check error %+v", err)
+		if replicaStateChange != nil {
+			c.WriteReplicaStateChangeToEtcd(c.etcdClient, replicaStateChange)
+		}
 		return false
 	}
 	if replicaStateChange.LatestBlockNumber != nil {
