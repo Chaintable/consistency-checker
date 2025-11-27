@@ -644,7 +644,7 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	if err != nil {
 		log.Printf("check error %+v", err)
 		if replicaStateChange != nil {
-			c.RemoveOfflineNodesToEtcd(c.etcdClient, replicaStateChange)
+			c.RemoveOfflineNodesFromEtcd(c.etcdClient, replicaStateChange)
 		}
 		return false
 	}
@@ -662,20 +662,19 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	return true
 }
 
-func (c *Checker) RemoveOfflineNodesToEtcd(writer *clientv3.Client, replicaStateChange *ReplicaStateChangeNotification) {
+func (c *Checker) RemoveOfflineNodesFromEtcd(writer *clientv3.Client, replicaStateChange *ReplicaStateChangeNotification) {
 	var err error
 	ops := make([]clientv3.Op, 0)
 	for _, change := range replicaStateChange.ReplicaStates {
-		if change.ChangeType == nodes.DelNode {
+		if change.ChangeType == nodes.DelNode && change.Node.Lease == 0 {
 			var nodeKey string
 			if c.config.IsVersionMode() {
 				nodeKey = fmt.Sprintf("%d/%s/nodes/%s_%d", c.config.ChainID, c.config.Version, change.Address, change.Port)
 			} else {
 				nodeKey = fmt.Sprintf("%d/nodes/%s_%d", c.config.ChainID, change.Address, change.Port)
 			}
-			if change.Node.Lease == 0 {
-				ops = append(ops, clientv3.OpDelete(nodeKey))
-			}
+			ops = append(ops, clientv3.OpDelete(nodeKey))
+			log.Printf("remove offline node from etcd: %s", nodeKey)
 		}
 	}
 	// 如果ops为空，无需提交事务
@@ -697,10 +696,10 @@ func (c *Checker) RemoveOfflineNodesToEtcd(writer *clientv3.Client, replicaState
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("etcd write timeout: %v", err)
+		} else {
+			log.Printf("etcd delete error: %v", err)
 		}
-		return
 	}
-	log.Printf("remove offline nodes to etcd %+v", replicaStateChange)
 }
 
 func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replicaStateChange *ReplicaStateChangeNotification) error {
