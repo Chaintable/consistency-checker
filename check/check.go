@@ -378,6 +378,7 @@ func (c *Checker) getRawValidation(blockCtx *types.BlockContext) (*types.BlockVa
 	} else {
 		s3Key = fmt.Sprintf("%d/%d/%s", c.config.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
 	}
+	log.Printf("getRawValidation s3Key: %s", s3Key)
 	obj, err := c.outerS3Reader.GetObject(
 		context.Background(),
 		&s3.GetObjectInput{
