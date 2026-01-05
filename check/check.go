@@ -174,10 +174,9 @@ func (c *Checker) InitLeaderFromEtcd() error {
 		return err
 	}
 
-	// 获取当前的 ModRevision，用于 watch 的起始点
-	var watchRevision int64
+	// 使用当前的 Header Revision，用于 watch 的起始点
+	watchRevision := resp.Header.Revision
 	if len(resp.Kvs) > 0 {
-		watchRevision = resp.Kvs[0].ModRevision
 		etcdVersion := string(resp.Kvs[0].Value)
 		if etcdVersion == c.config.Version {
 			log.Printf("version matches, becoming leader: %s", c.config.Version)
@@ -189,8 +188,6 @@ func (c *Checker) InitLeaderFromEtcd() error {
 			log.Printf("version %s, leader version %s, not leader", c.config.Version, etcdVersion)
 		}
 	} else {
-		// key 不存在时，使用当前的 Header Revision
-		watchRevision = resp.Header.Revision
 		log.Printf("version key does not exist in etcd: %s", outerVersionKey)
 	}
 
@@ -212,11 +209,7 @@ func (c *Checker) InitLeaderFromEtcd() error {
 						log.Printf("Failed to get version key after watch error: %v", err)
 						watchChan = c.etcdClient.Watch(context.Background(), outerVersionKey)
 					} else {
-						if len(retryResp.Kvs) > 0 {
-							watchRevision = retryResp.Kvs[0].ModRevision
-						} else {
-							watchRevision = retryResp.Header.Revision
-						}
+						watchRevision = retryResp.Header.Revision
 						watchChan = c.etcdClient.Watch(context.Background(), outerVersionKey, clientv3.WithRev(watchRevision))
 					}
 					continue
