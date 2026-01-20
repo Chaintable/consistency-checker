@@ -39,7 +39,7 @@ var defaultConfig = Config{
 	RpcNodeTimeout:       50,
 	MsgWaitTimeout:       5000,
 	EtcdWriteTimeout:     5000, // 5 seconds default
-	EtcdLockTTL:          15,
+	EtcdLockTTL:          20,
 	VersionCheckInterval: 5, // 5 seconds default
 }
 
