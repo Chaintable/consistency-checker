@@ -174,8 +174,6 @@ func (c *Checker) InitLeaderFromEtcd() error {
 		return err
 	}
 
-	// 使用当前的 Header Revision，用于 watch 的起始点
-	watchRevision := resp.Header.Revision
 	if len(resp.Kvs) > 0 {
 		etcdVersion := string(resp.Kvs[0].Value)
 		if etcdVersion == c.config.Version {
@@ -191,60 +189,51 @@ func (c *Checker) InitLeaderFromEtcd() error {
 		log.Printf("version key does not exist in etcd: %s", outerVersionKey)
 	}
 
-	// 启动 goroutine 监听 version key 的变化
+	// 启动 goroutine 周期性检查 version key
 	go func() {
-		log.Printf("Starting watch for version key: %s from revision: %d", outerVersionKey, watchRevision)
-		// 从 ModRevision 开始监听，确保不会错过任何变更
-		watchChan := c.etcdClient.Watch(context.Background(), outerVersionKey, clientv3.WithRev(watchRevision))
+		interval := time.Duration(c.config.VersionCheckInterval) * time.Second
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		log.Printf("Starting periodic check for version key: %s (interval: %v)", outerVersionKey, interval)
 
 		for {
 			select {
-			case watchResp := <-watchChan:
-				if watchResp.Err() != nil {
-					log.Printf("Watch error for version key: %v", watchResp.Err())
-					// 发生错误时重新获取当前状态并重建 watch
-					time.Sleep(time.Second)
-					retryResp, err := c.etcdClient.Get(context.Background(), outerVersionKey)
-					if err != nil {
-						log.Printf("Failed to get version key after watch error: %v", err)
-						watchChan = c.etcdClient.Watch(context.Background(), outerVersionKey)
-					} else {
-						watchRevision = retryResp.Header.Revision
-						watchChan = c.etcdClient.Watch(context.Background(), outerVersionKey, clientv3.WithRev(watchRevision))
-					}
+			case <-ticker.C:
+				resp, err := c.etcdClient.Get(context.Background(), outerVersionKey)
+				if err != nil {
+					log.Printf("Failed to get version key: %v", err)
 					continue
 				}
 
-				// 处理 watch 事件
-				for _, event := range watchResp.Events {
-					switch event.Type {
-					case clientv3.EventTypePut:
-						newVersion := string(event.Kv.Value)
-						log.Printf("Version key updated: %s -> %s (revision: %d)", outerVersionKey, newVersion, event.Kv.ModRevision)
-
-						if newVersion == c.config.Version {
-							// 版本匹配，尝试成为 leader
-							log.Printf("Version matches, attempting to become leader")
-							err := c.ChangeToChainLeader()
-							if err != nil {
+				if len(resp.Kvs) > 0 {
+					currentVersion := string(resp.Kvs[0].Value)
+					if currentVersion == c.config.Version {
+						// 版本匹配，尝试成为 leader
+						if c.etcdLock == nil {
+							log.Printf("Version matches, attempting to become leader: %s", c.config.Version)
+							if err := c.ChangeToChainLeader(); err != nil {
 								log.Printf("Failed to become chain leader: %v", err)
 							}
-						} else {
-							// 版本不匹配，放弃 leader 身份
+						}
+					} else {
+						// 版本不匹配，放弃 leader 身份
+						if c.etcdLock != nil {
 							log.Printf("Version mismatch (expected: %s, got: %s), revoking leader",
-								c.config.Version, newVersion)
+								c.config.Version, currentVersion)
 							c.RevokeChainLeader()
 						}
-
-					case clientv3.EventTypeDelete:
-						// version key 被删除，放弃 leader 身份
-						log.Printf("Version key deleted: %s (revision: %d), revoking leader", outerVersionKey, event.Kv.ModRevision)
+					}
+				} else {
+					// version key 不存在，放弃 leader 身份
+					if c.etcdLock != nil {
+						log.Printf("Version key does not exist, revoking leader")
 						c.RevokeChainLeader()
 					}
 				}
 
 			case <-c.quit:
-				log.Printf("Stopping version key watch for: %s", outerVersionKey)
+				log.Printf("Stopping periodic check for version key: %s", outerVersionKey)
 				return
 			}
 		}

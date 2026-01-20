@@ -29,16 +29,18 @@ type Config struct {
 	CommitInterval            int      `yaml:"commit_interval"`               // 提交到kafka的间隔
 	EtcdWriteTimeout          int      `yaml:"etcd_write_timeout_ms"`         // etcd写入超时时间(毫秒)
 	EtcdLockTTL               int64    `yaml:"etcd_lock_ttl"`                 // etcd锁的ttl(秒)
+	VersionCheckInterval      int      `yaml:"version_check_interval"`        // 版本检查间隔(秒)
 }
 
 var defaultConfig = Config{
-	Listen:           ":8663",
-	ReadyRatio:       0.8,
-	CheckInterval:    20,
-	RpcNodeTimeout:   50,
-	MsgWaitTimeout:   5000,
-	EtcdWriteTimeout: 5000, // 5 seconds default
-	EtcdLockTTL:      15,
+	Listen:               ":8663",
+	ReadyRatio:           0.8,
+	CheckInterval:        20,
+	RpcNodeTimeout:       50,
+	MsgWaitTimeout:       5000,
+	EtcdWriteTimeout:     5000, // 5 seconds default
+	EtcdLockTTL:          20,
+	VersionCheckInterval: 5, // 5 seconds default
 }
 
 // IsVersionMode 判断是否启用版本模式

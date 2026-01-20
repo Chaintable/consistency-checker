@@ -107,9 +107,10 @@ func (l *EtcdLock) Acquire() bool {
 		select {
 		case watchResp := <-watchChan:
 			if watchResp.Err() != nil {
-				log.Printf("Watch error: %v", watchResp.Err())
-				l.Release()
-				return false
+				log.Printf("Watch error: %v, retrying lock acquisition", watchResp.Err())
+				time.Sleep(time.Second)
+				// watch 出错时重试获取锁，而不是放弃
+				continue
 			}
 
 			// 检查是否有删除事件
@@ -144,20 +145,32 @@ func (l *EtcdLock) Release() {
 }
 
 func (l *EtcdLock) WatchDog() {
-	ticker := time.NewTicker(time.Duration(l.ttl/3) * time.Second)
+	ticker := time.NewTicker(time.Duration(l.ttl/4) * time.Second)
 	defer ticker.Stop()
+
+	failCount := 0
+	maxFail := 3 // 允许连续失败 3 次，容忍单节点故障
 
 	for {
 		select {
 		case <-ticker.C:
 			_, err := l.client.KeepAliveOnce(context.Background(), l.lease)
 			if err != nil {
-				log.Printf("Failed to refresh lease: %v, lock lost", err)
-				l.lease = 0 // 标记 lease 已失效
-				if l.onLost != nil {
-					l.onLost()
+				failCount++
+				log.Printf("Failed to refresh lease (attempt %d/%d): %v", failCount, maxFail, err)
+				if failCount >= maxFail {
+					log.Printf("Max retry reached, lock lost")
+					l.lease = 0 // 标记 lease 已失效
+					if l.onLost != nil {
+						l.onLost()
+					}
+					return
 				}
-				return
+			} else {
+				if failCount > 0 {
+					log.Printf("Lease refresh recovered after %d failures", failCount)
+				}
+				failCount = 0 // 成功后重置计数
 			}
 		case <-l.ctx.Done():
 			return
