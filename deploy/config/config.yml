@@ -1,19 +1,23 @@
-listen: "0.0.0.0:8881"                                            # Default listening address
+listen: "0.0.0.0:8882"                                            # Default listening address
 ready_ratio: 0.8                                                  # Default readiness ratio
 check_num: 3                                                      # Default number of checks
 check_interval_ms: 20                                             # Default interval for checks in milliseconds
 chain_id: 1                                                       # Default Chain ID (e.g., 1)
-consistency_db_path: "/eth/consistency_db"                             # Default path for consistency database
-outer_s3_bucket: "chaintable-pipeline-test"                       # Default inner S3 bucket name
+version: "abc"
+consistency_db_path: "/eth/consistency_db"                        # Default path for consistency database
+outer_s3_bucket: "chaintable-pipeline"                            # Default inner S3 bucket name
 outer_s3_region: "ap-northeast-1"                                 # Default inner S3 region
 inner_brokers:                                                    # Default list of inner brokers
-  - "b-1.chaintablenodexpi.pz2h9z.c4.kafka.ap-northeast-1.amazonaws.com:9092"
-inner_new_block_topic: "nodex_pipeline_test"                      # Default topic for outer new blocks
-inner_new_block_group_id: "consistency-group-test"                # Default group ID for new blocks in inner system
+  - "b-1:9092"
+inner_new_block_topic: "nodex_pipeline_1_abc"                         # Default topic for outer new blocks
+inner_new_block_group_id: "consistency-group-1-abc"                   # Default group ID for new blocks in inner system
 outer_brokers:                                                    # Default list of outer brokers
-  - "b-1.chaintablenodexpi.pz2h9z.c4.kafka.ap-northeast-1.amazonaws.com:9092"
-outer_new_block_topic: "pipeline_test"                            # Default topic for outer new blocks
-etcd_endpoints: 
+  - "b-1:9092"
+outer_new_block_topic: "pipeline_1"                               # Default topic for outer new blocks
+
+outer_version_new_block_topic: "pipeline_1_abc"
+
+etcd_endpoints:
   - "127.0.0.1:2479"
   - "127.0.0.1:2579"
   - "127.0.0.1:2379"
