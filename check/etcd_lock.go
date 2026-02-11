@@ -3,12 +3,14 @@ package check
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 type EtcdLock struct {
+	mu         sync.Mutex
 	leaderKey  string
 	versionKey string
 	version    string
@@ -132,15 +134,22 @@ func (l *EtcdLock) Acquire() bool {
 }
 
 func (l *EtcdLock) Release() {
-	if l.lease != 0 {
-		_, _ = l.client.Revoke(context.Background(), l.lease)
-		l.lease = 0
-		log.Printf("Lock released for key: %s, lease: %d", l.leaderKey, l.lease)
+	l.mu.Lock()
+	lease := l.lease
+	l.lease = 0
+	cancel := l.cancel
+	l.cancel = nil
+	l.mu.Unlock()
+
+	if lease != 0 {
+		ctx, ctxCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = l.client.Revoke(ctx, lease)
+		ctxCancel()
+		log.Printf("Lock released for key: %s, lease: %d", l.leaderKey, lease)
 	}
 
-	if l.cancel != nil {
-		l.cancel()
-		l.cancel = nil
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -154,15 +163,24 @@ func (l *EtcdLock) WatchDog() {
 	for {
 		select {
 		case <-ticker.C:
-			_, err := l.client.KeepAliveOnce(context.Background(), l.lease)
+			l.mu.Lock()
+			lease := l.lease
+			l.mu.Unlock()
+			if lease == 0 {
+				return
+			}
+			_, err := l.client.KeepAliveOnce(context.Background(), lease)
 			if err != nil {
 				failCount++
 				log.Printf("Failed to refresh lease (attempt %d/%d): %v", failCount, maxFail, err)
 				if failCount >= maxFail {
 					log.Printf("Max retry reached, lock lost")
-					l.lease = 0 // 标记 lease 已失效
-					if l.onLost != nil {
-						l.onLost()
+					l.mu.Lock()
+					l.lease = 0
+					onLost := l.onLost
+					l.mu.Unlock()
+					if onLost != nil {
+						onLost() // 锁外调用，避免与 Release 死锁
 					}
 					return
 				}
