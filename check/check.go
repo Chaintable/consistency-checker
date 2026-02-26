@@ -450,7 +450,22 @@ func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, validation *types.B
 	return nil
 }
 
-// rewriteForkBlocksAtSameHeight 检查S3中相同高度但不同hash的区块，将其标记为fork
+func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) {
+	for _, block := range dropBlocks {
+		blockValidation, err := c.getRawValidation(&block)
+		if err != nil {
+			continue
+		}
+		blockValidation.IsFork = true
+		log.Printf("rewrite block %d", block.BlockNumber)
+		err = c.rewriteBlock(&block, blockValidation)
+		if err != nil {
+			continue
+		}
+	}
+}
+
+// rewriteForkBlocksAtSameHeight 检查S3中相同高度但不同hash的区块，将其标记为fork, 严格
 func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) error {
 	for _, block := range newBlocks {
 		// 列出该高度下的所有区块
@@ -518,6 +533,9 @@ func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) 
 					return fmt.Errorf("get fork block validation error at height %d, hash %s: %w",
 						block.BlockNumber, existingHashStr, err)
 				}
+				if forkValidation.IsFork {
+					continue
+				}
 				forkValidation.IsFork = true
 
 				// 重写为fork
@@ -549,12 +567,12 @@ func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) 
 						return fmt.Errorf("encode canonical block validation error at height %d, hash %s: %w",
 							block.BlockNumber, block.Hash.String(), err)
 					}
-					params := &s3.PutObjectInput{
-						Bucket: &c.config.OuterS3Bucket,
-						Key:    obj.Key,
-						Body:   bytes.NewReader(data),
-					}
 					for i := 0; i < 3; i++ {
+						params := &s3.PutObjectInput{
+							Bucket: &c.config.OuterS3Bucket,
+							Key:    obj.Key,
+							Body:   bytes.NewReader(data),
+						}
 						_, err = c.outerS3Reader.PutObject(context.Background(), params)
 						if err == nil {
 							break
@@ -859,31 +877,34 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 
 	newBlocks := blockNotice.NewBlocks
 
-	// 2. 写入db
+	// 2. 重写fork block
+	c.rewriteDropBlocks(dropBlocks)
+
+	// 3. 写入db
 	if !c.writeBlockInfoToDB(blockNotice.NewBlocks) {
 		log.Printf("write block info to db error")
 		return false
 	}
 
-	// 3. 检查并重写S3中相同高度但不同hash的BlockValidation，标记IsFork=true
+	// 4. 检查并重写S3中相同高度但不同hash的BlockValidation，标记IsFork=true
 	if err := c.rewriteForkBlocksAtSameHeight(newBlocks); err != nil {
 		log.Printf("rewrite fork blocks at same height error %+v", err)
 		return false
 	}
 
-	// 4. 发送drop block通知
+	// 5. 发送drop block通知
 	if !c.WriteDropBlockNotice(dropBlocks) {
 		log.Printf("write drop block notice error")
 		return false
 	}
 
-	// 5. 发送新块通知
+	// 6. 发送新块通知
 	if !c.WriteNewBlockNotice(newBlocks) {
 		log.Printf("write new block notice error")
 		return false
 	}
 
-	// 6. 对于从切换成leader的情况，进行topic align
+	// 7. 对于从切换成leader的情况，进行topic align
 	if !c.AlignOuterSingleton() {
 		log.Printf("align outer singleton error")
 		return false
