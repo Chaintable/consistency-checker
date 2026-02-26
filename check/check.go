@@ -402,6 +402,19 @@ func (c *Checker) getValidationHashWithReTry(blockCtx *types.BlockContext) (int6
 	return 0, fmt.Errorf("get validation hash many times but not ready")
 }
 
+func (c *Checker) getRawValidationWithReTry(blockCtx *types.BlockContext) (*types.BlockValidation, error) {
+	for i := 0; i < 3; i++ {
+		validation, err := c.getRawValidation(blockCtx)
+		if err != nil {
+			log.Printf("get raw validation error %+v", err)
+		} else {
+			return validation, nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return nil, fmt.Errorf("get raw validation many times but not ready")
+}
+
 func (c *Checker) getValidationHashMany(newBlocks []types.BlockContext) ([]int64, error) {
 	validationHashes := make([]int64, len(newBlocks))
 	var err error
@@ -414,20 +427,16 @@ func (c *Checker) getValidationHashMany(newBlocks []types.BlockContext) ([]int64
 	return validationHashes, nil
 }
 
-func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, blockValidation int64) error {
+func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, validation *types.BlockValidation) error {
 	var s3Key string
 	if c.config.IsVersionMode() {
 		s3Key = fmt.Sprintf("%d/%s/%d/%s", c.config.ChainID, c.config.Version, blockCtx.BlockNumber, blockCtx.Hash.String())
 	} else {
 		s3Key = fmt.Sprintf("%d/%d/%s", c.config.ChainID, blockCtx.BlockNumber, blockCtx.Hash.String())
 	}
-	validation := types.BlockValidation{
-		ValidationHash: blockValidation,
-		IsFork:         true,
-	}
-	data, err := util.EncodeToJsonGzip(&validation)
+	data, err := util.EncodeToJsonGzip(validation)
 	if err != nil {
-		return nil
+		return err
 	}
 	params := &s3.PutObjectInput{
 		Bucket: &c.config.OuterS3Bucket,
@@ -441,23 +450,23 @@ func (c *Checker) rewriteBlock(blockCtx *types.BlockContext, blockValidation int
 	return nil
 }
 
-func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) error {
+func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) {
 	for _, block := range dropBlocks {
-		blockValidation, err := c.getValidationHashWithReTry(&block)
+		blockValidation, err := c.getRawValidation(&block)
 		if err != nil {
-			return err
+			continue
 		}
+		blockValidation.IsFork = true
 		log.Printf("rewrite block %d", block.BlockNumber)
 		err = c.rewriteBlock(&block, blockValidation)
 		if err != nil {
-			return err
+			continue
 		}
 	}
-	return nil
 }
 
-// rewriteForkBlocksAtSameHeight 检查S3中相同高度但不同hash的区块，将其标记为fork
-func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) {
+// rewriteForkBlocksAtSameHeight 检查S3中相同高度但不同hash的区块，将其标记为fork, 严格
+func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) error {
 	for _, block := range newBlocks {
 		// 列出该高度下的所有区块
 		var prefix string
@@ -471,10 +480,18 @@ func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) 
 			Prefix: &prefix,
 		}
 
-		resp, err := c.outerS3Reader.ListObjectsV2(context.Background(), listParams)
-		if err != nil {
+		var resp *s3.ListObjectsV2Output
+		var err error
+		for i := 0; i < 3; i++ {
+			resp, err = c.outerS3Reader.ListObjectsV2(context.Background(), listParams)
+			if err == nil {
+				break
+			}
 			log.Printf("list objects at height %d error: %+v", block.BlockNumber, err)
-			continue // 继续处理其他区块
+			time.Sleep(1 * time.Second)
+		}
+		if err != nil {
+			return fmt.Errorf("list objects at height %d error: %w", block.BlockNumber, err)
 		}
 
 		// 遍历该高度下的所有区块
@@ -505,52 +522,74 @@ func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) 
 				log.Printf("found fork block at height %d: existing hash %s, new canonical hash %s",
 					block.BlockNumber, existingHashStr, block.Hash.String())
 
-				// 获取原有的validation hash
+				// 读取原有validation，并仅更新IsFork，避免覆盖其他字段
 				forkBlockCtx := types.BlockContext{
 					BlockNumber: block.BlockNumber,
 					Hash:        common.HexToHash(existingHashStr),
 				}
 
-				forkValidationHash, err := c.getValidationHash(&forkBlockCtx)
+				forkValidation, err := c.getRawValidationWithReTry(&forkBlockCtx)
 				if err != nil {
-					log.Printf("get fork block validation hash error: %+v", err)
+					return fmt.Errorf("get fork block validation error at height %d, hash %s: %w",
+						block.BlockNumber, existingHashStr, err)
+				}
+				if forkValidation.IsFork {
 					continue
 				}
+				forkValidation.IsFork = true
 
 				// 重写为fork
-				err = c.rewriteBlock(&forkBlockCtx, forkValidationHash)
-				if err != nil {
+				for i := 0; i < 3; i++ {
+					err = c.rewriteBlock(&forkBlockCtx, forkValidation)
+					if err == nil {
+						break
+					}
 					log.Printf("rewrite fork block %s at height %d error: %+v",
 						existingHashStr, block.BlockNumber, err)
-				} else {
-					log.Printf("successfully marked block %s at height %d as fork",
-						existingHashStr, block.BlockNumber)
+					time.Sleep(1 * time.Second)
 				}
-			} else {
-				validation, err := c.getRawValidation(&block)
 				if err != nil {
-					log.Printf("get canonical block validation hash error: %+v", err)
+					return fmt.Errorf("rewrite fork block %s at height %d error: %w",
+						existingHashStr, block.BlockNumber, err)
+				}
+				log.Printf("successfully marked block %s at height %d as fork",
+					existingHashStr, block.BlockNumber)
+			} else {
+				validation, err := c.getRawValidationWithReTry(&block)
+				if err != nil {
+					return fmt.Errorf("get canonical block validation hash error at height %d, hash %s: %w",
+						block.BlockNumber, block.Hash.String(), err)
 				}
 				if validation.IsFork {
 					validation.IsFork = false
-					data, err := util.EncodeToJsonGzip(&validation)
+					data, err := util.EncodeToJsonGzip(validation)
 					if err != nil {
-						continue
+						return fmt.Errorf("encode canonical block validation error at height %d, hash %s: %w",
+							block.BlockNumber, block.Hash.String(), err)
 					}
-					params := &s3.PutObjectInput{
-						Bucket: &c.config.OuterS3Bucket,
-						Key:    obj.Key,
-						Body:   bytes.NewReader(data),
+					for i := 0; i < 3; i++ {
+						params := &s3.PutObjectInput{
+							Bucket: &c.config.OuterS3Bucket,
+							Key:    obj.Key,
+							Body:   bytes.NewReader(data),
+						}
+						_, err = c.outerS3Reader.PutObject(context.Background(), params)
+						if err == nil {
+							break
+						}
+						log.Printf("rewrite canonical block %s at height %d error: %+v",
+							block.Hash.String(), block.BlockNumber, err)
+						time.Sleep(1 * time.Second)
 					}
-					_, err = c.outerS3Reader.PutObject(context.Background(), params)
 					if err != nil {
-						continue
+						return fmt.Errorf("rewrite canonical block %s at height %d error: %w",
+							block.Hash.String(), block.BlockNumber, err)
 					}
 				}
 			}
 		}
 	}
-
+	return nil
 }
 
 type ReplicaStateChangeNotification struct {
@@ -768,17 +807,6 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 	return nil
 }
 
-func (c *Checker) reWriteForkBlock(dropBlocks []types.BlockContext) bool {
-	// 对于fork block，重写is_fork=true
-	err := c.rewriteDropBlocks(dropBlocks)
-	if err != nil {
-		log.Printf("remote drop blocks error %+v", err)
-		return false
-	}
-
-	return true
-}
-
 func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
 	validationHashes, err := c.getValidationHashMany(newBlocks)
 	if err != nil {
@@ -844,16 +872,13 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 		return false
 	}
 
-	dropBlocks := blockNotice.DropBlocks
+	dropBlocks := append([]types.BlockContext(nil), blockNotice.DropBlocks...)
 	slices.Reverse(dropBlocks)
 
 	newBlocks := blockNotice.NewBlocks
 
 	// 2. 重写fork block
-	if !c.reWriteForkBlock(dropBlocks) {
-		log.Printf("rewrite fork block error")
-		return false
-	}
+	c.rewriteDropBlocks(dropBlocks)
 
 	// 3. 写入db
 	if !c.writeBlockInfoToDB(blockNotice.NewBlocks) {
@@ -862,7 +887,10 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 	}
 
 	// 4. 检查并重写S3中相同高度但不同hash的BlockValidation，标记IsFork=true
-	c.rewriteForkBlocksAtSameHeight(newBlocks)
+	if err := c.rewriteForkBlocksAtSameHeight(newBlocks); err != nil {
+		log.Printf("rewrite fork blocks at same height error %+v", err)
+		return false
+	}
 
 	// 5. 发送drop block通知
 	if !c.WriteDropBlockNotice(dropBlocks) {
@@ -1133,7 +1161,7 @@ func (c *Checker) Run() {
 					break
 				}
 				if !c.Process(blockNotice) {
-					log.Printf("process error %+v", err)
+					log.Printf("process error, retrying msg offset %d", msg.Offset)
 					time.Sleep(1 * time.Second)
 					continue
 				} else {
