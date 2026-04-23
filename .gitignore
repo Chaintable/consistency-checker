@@ -1,3 +1,5 @@
 main
 consistency_db
 CLAUDE.md
+bin/*
+checker

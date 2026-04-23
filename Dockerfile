@@ -1,9 +1,5 @@
 FROM golang:1.23-bookworm as builder
 
-ARG ACCESS_TOKEN
-
-RUN git config --global url."https://x-access-token:${ACCESS_TOKEN}@github.com".insteadOf "https://github.com"
-
 WORKDIR /app
 
 COPY . .
