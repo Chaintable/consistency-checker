@@ -77,7 +77,7 @@ jobs:
         with:
           registry-type: public
 
-      - name: Build & Push (main)
+      - name: Build & Push to Public ECR
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -90,19 +90,3 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
-
-      # ---------- Generate Changelog ----------
-      - name: Generate Changelog
-        uses: mikeal/github-changelog-generator-action@v1.0.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
-
-      # ---------- Commit Changelog ----------
-      - name: Commit and push changelog.md
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add changelog.md
-          git commit -m "chore: update changelog"
-          git push
