@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -92,6 +93,15 @@ func (cdb *ConsistencyDB) GetBlockInfoByHash(hash common.Hash) (*BlockInfo, erro
 
 	canonicalHash, err := cdb.getBlockHashByNum(bi.Num)
 	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			// reorg到更短链后该高度的映射已被清理：当前高度没有canonical块，此块必为fork
+			return &BlockInfo{
+				ID:             hash,
+				Height:         bi.Num.Uint64(),
+				ValidationHash: bi.ValidationHash.Int64(),
+				IsFork:         true,
+			}, nil
+		}
 		return nil, err
 	}
 	return &BlockInfo{
@@ -100,6 +110,18 @@ func (cdb *ConsistencyDB) GetBlockInfoByHash(hash common.Hash) (*BlockInfo, erro
 		ValidationHash: bi.ValidationHash.Int64(),
 		IsFork:         canonicalHash != hash,
 	}, nil
+}
+
+// GetCanonicalHashByNum 返回某高度的canonical hash；db中没有该高度记录时ok为false
+func (cdb *ConsistencyDB) GetCanonicalHashByNum(num uint64) (common.Hash, bool, error) {
+	hash, err := cdb.getBlockHashByNum(new(big.Int).SetUint64(num))
+	if err != nil {
+		if errors.Is(err, pebble.ErrNotFound) {
+			return common.Hash{}, false, nil
+		}
+		return common.Hash{}, false, err
+	}
+	return hash, true, nil
 }
 
 func (cdb *ConsistencyDB) GetBlockInfoByNumOrHash(id *rpc.BlockNumberOrHash) (*BlockInfo, error) {
@@ -153,6 +175,22 @@ func (cdb *ConsistencyDB) WriteBlockInfos(newBlocks []types.BlockContext, valida
 		}
 		err = batch.Set(append(NumPrefix, bi.Num.Bytes()...), block.Hash[:], nil)
 		if err != nil {
+			return err
+		}
+	}
+	// reorg到更短/等长链时，清理高于新链头的残留num->hash映射，
+	// 避免这些高度上被drop的块被误判为canonical
+	for h := newBlocks[len(newBlocks)-1].BlockNumber + 1; ; h++ {
+		key := append(NumPrefix, new(big.Int).SetUint64(h).Bytes()...)
+		_, closer, err := cdb.db.Get(key)
+		if errors.Is(err, pebble.ErrNotFound) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		closer.Close()
+		if err := batch.Delete(key, nil); err != nil {
 			return err
 		}
 	}

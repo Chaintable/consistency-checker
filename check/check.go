@@ -536,16 +536,28 @@ func (c *Checker) rewriteValidationAtKeyWithRetry(s3Key string, blockNumber uint
 	return err
 }
 
+// rewriteDropBlocks 将被drop的块的validation标记为fork。
+// 失败不阻塞Process：同高度的标记会被rewriteForkBlocksAtSameHeight和定期巡检兜底，
+// 这里重试后仍失败只计数告警。
 func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) {
 	for _, block := range dropBlocks {
-		blockValidation, err := c.getRawValidation(&block)
+		blockValidation, err := c.getRawValidationByKeyWithReTry(c.blockValidationKey(&block))
 		if err != nil {
+			log.Printf("rewrite drop block %s at height %d: get validation error %+v",
+				block.Hash.String(), block.BlockNumber, err)
+			metrics.DropBlockRewriteFailures.Inc()
+			continue
+		}
+		if blockValidation.IsFork {
 			continue
 		}
 		blockValidation.IsFork = true
 		log.Printf("rewrite block %d", block.BlockNumber)
 		err = c.rewriteBlockWithRetry(&block, blockValidation)
 		if err != nil {
+			log.Printf("rewrite drop block %s at height %d error %+v",
+				block.Hash.String(), block.BlockNumber, err)
+			metrics.DropBlockRewriteFailures.Inc()
 			continue
 		}
 	}
@@ -626,6 +638,78 @@ func (c *Checker) rewriteForkBlocksAtHeight(block types.BlockContext) (bool, err
 			canonicalHash, block.BlockNumber)
 	}
 	return !rewrote, nil
+}
+
+// runForkScan 周期性巡检最近若干高度的fork标记。
+// rewriteForkBlocksAtSameHeight只在通知到达的瞬间检查同高度对象，
+// 之后被外部覆盖的is_fork标记（如上传方重启回放时的重复上传）没有任何机制能发现，
+// 巡检把一次性窗口变成持续收敛。
+func (c *Checker) runForkScan() {
+	interval := c.config.ForkScanInterval
+	if interval <= 0 || c.config.ForkScanLookback == 0 {
+		log.Printf("fork scan disabled")
+		return
+	}
+	log.Printf("fork scan enabled: interval %ds, lookback %d heights", interval, c.config.ForkScanLookback)
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.quit:
+			return
+		case <-ticker.C:
+			c.scanRecentForkBlocks()
+		}
+	}
+}
+
+func (c *Checker) scanRecentForkBlocks() {
+	c.Lock()
+	latest := c.latestOuterBlockChangeNotification
+	c.Unlock()
+	if latest == nil {
+		return
+	}
+	tip := latest.BlockNumber
+	start := uint64(0)
+	if lookback := c.config.ForkScanLookback; tip >= lookback {
+		start = tip - lookback + 1
+	}
+	// 按高度分段持锁，避免整轮巡检阻塞消息处理
+	for h := start; h <= tip; h++ {
+		c.Lock()
+		c.scanForkBlocksAtHeight(h)
+		c.Unlock()
+	}
+}
+
+// scanForkBlocksAtHeight 巡检单个高度，调用方需持有c.Lock
+func (c *Checker) scanForkBlocksAtHeight(height uint64) {
+	// 巡检期间可能reorg到更短链，tip之上的高度没有canonical，跳过
+	if c.latestOuterBlockChangeNotification == nil || height > c.latestOuterBlockChangeNotification.BlockNumber {
+		return
+	}
+	hash, ok, err := db.DB.GetCanonicalHashByNum(height)
+	if err != nil {
+		log.Printf("fork scan: get canonical hash at height %d error %+v", height, err)
+		metrics.ForkScanErrors.Inc()
+		return
+	}
+	if !ok {
+		// db中没有该高度的记录（冷启动/丢盘），没有可信基准，跳过
+		metrics.ForkScanSkips.Inc()
+		return
+	}
+	done, err := c.rewriteForkBlocksAtHeight(types.BlockContext{BlockNumber: height, Hash: hash})
+	if err != nil {
+		log.Printf("fork scan: rewrite at height %d error %+v", height, err)
+		metrics.ForkScanErrors.Inc()
+		return
+	}
+	if !done {
+		log.Printf("fork scan: rewrote fork marks at height %d", height)
+		metrics.ForkScanRewrites.Inc()
+	}
 }
 
 type ReplicaStateChangeNotification struct {
@@ -1165,6 +1249,7 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 }
 
 func (c *Checker) Run() {
+	go c.runForkScan()
 	for {
 		select {
 		case <-c.quit:

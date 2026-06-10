@@ -99,6 +99,8 @@ docker run consistency-checker -config /path/to/config.yml
 | `etcd_write_timeout_ms` | `5000` | etcd 写超时（毫秒） |
 | `version_check_interval` | `5` | Leader 版本检查间隔（秒） |
 | `commit_interval` | - | Kafka commit 间隔（秒） |
+| `fork_scan_interval_sec` | `60` | fork 标记巡检间隔（秒，<=0 禁用） |
+| `fork_scan_lookback` | `64` | fork 标记巡检回看的高度数 |
 
 CLI 参数 `-config` 和 `-listen` 可覆盖配置文件中的值。
 
