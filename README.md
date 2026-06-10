@@ -99,6 +99,8 @@ docker run consistency-checker -config /path/to/config.yml
 | `etcd_write_timeout_ms` | `5000` | etcd write timeout (ms) |
 | `version_check_interval` | `5` | Leader version check interval (seconds) |
 | `commit_interval` | - | Kafka commit interval (seconds) |
+| `fork_scan_interval_sec` | `60` | Periodic fork-mark scan interval (seconds, <=0 disables) |
+| `fork_scan_lookback` | `64` | Number of recent heights re-checked by the fork-mark scan |
 
 CLI flags `-config` and `-listen` override the config file.
 
