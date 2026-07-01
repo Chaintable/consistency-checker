@@ -12,8 +12,26 @@ env:
   IMAGE_NAME: consistency-checkerx
 
 jobs:
-  test:
-    runs-on: ubuntu-24.04
+  # One matrix entry per architecture, each on its OWN native runner (no QEMU).
+  # Keeps the original semantics: fmt/vet/test/lint always run; PR builds the
+  # image to verify the Dockerfile (no push); push/dispatch build + push.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,44 +65,39 @@ jobs:
           version: latest
           args: --timeout=5m
 
-  # Build each arch on its OWN native runner (no QEMU), push by digest.
-  build:
-    needs: test
-    if: github.event_name != 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            arch: amd64
-            runner: ubuntu-24.04
-          - platform: linux/arm64
-            arch: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ---------- PR: build only, native, no push ----------
+      - name: Build (PR)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          provenance: false
+
+      # ---------- push/dispatch: build + push this arch by digest ----------
       - name: Configure AWS credentials
+        if: github.event_name != 'pull_request'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Login to Public ECR
+        if: github.event_name != 'pull_request'
         uses: aws-actions/amazon-ecr-login@v2
         with:
           registry-type: public
 
       - name: Build and push by digest
         id: build
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -96,12 +109,14 @@ jobs:
           provenance: false
 
       - name: Export digest
+        if: github.event_name != 'pull_request'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: digest-${{ matrix.arch }}
@@ -109,14 +124,17 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Merge per-arch digests into one multi-arch tag.
+  # Combine the per-arch digests into the same multi-arch tags as before
+  # (REVISION + latest). Only when pushing (not on PRs).
   merge:
     needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+
     permissions:
       contents: read
       id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -145,7 +163,7 @@ jobs:
         with:
           registry-type: public
 
-      - name: Create manifest list and push
+      - name: Create multi-arch manifest and push
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
