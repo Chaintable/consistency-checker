@@ -249,7 +249,10 @@ func (c *Checker) Close() {
 }
 
 func (c *Checker) getVersionBlockByHash(hash common.Hash) (*types.BlockContext, error) {
-	s3Key := fmt.Sprintf("%d/%s/%s/block", c.config.ChainID, c.config.Version, hash.String())
+	// 从 outer S3 的 blockfile（key 为 {chainID}/{version}/{hash}）读区块头。
+	// 注意：{hash}/block 这个独立 header 对象只存在于 inner bucket，checker 只配了
+	// outer bucket，故改用 outer 已有的 blockfile，其 block 段含 height/parent_id/timestamp。
+	s3Key := fmt.Sprintf("%d/%s/%s", c.config.ChainID, c.config.Version, hash.String())
 	obj, err := c.outerS3Reader.GetObject(
 		context.Background(),
 		&s3.GetObjectInput{
@@ -263,16 +266,16 @@ func (c *Checker) getVersionBlockByHash(hash common.Hash) (*types.BlockContext, 
 	defer obj.Body.Close()
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(obj.Body)
-	header := types.Header{}
-	err = util.DecodeFromGzipJson(buf.Bytes(), &header)
+	blockFile := types.BlockFile{}
+	err = util.DecodeFromGzipJson(buf.Bytes(), &blockFile)
 	if err != nil {
 		return nil, err
 	}
 	blockCtx := &types.BlockContext{
-		BlockNumber: header.Number.ToInt().Uint64(),
+		BlockNumber: blockFile.Block.Height.Uint64(),
 		Hash:        hash,
-		ParentHash:  header.ParentHash,
-		Timestamp:   uint64(header.Timestamp),
+		ParentHash:  common.HexToHash(blockFile.Block.ParentID),
+		Timestamp:   blockFile.Block.Timestamp,
 	}
 	return blockCtx, nil
 }
