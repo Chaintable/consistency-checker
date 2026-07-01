@@ -954,6 +954,16 @@ func (c *Checker) isDuplicateBlockNotification(blockNotice *types.BlockChangeNot
 	return false
 }
 
+// isAlreadyProcessed 判断这条消息是否已被处理过：若本通知的 new 链尾已等于当前
+// latest，说明上一次已处理到 WriteNewBlockNotice（outer 已转发、latest 已推进），
+// 只是整条 Process 未提交。用于避免 reorg 消息失败重试时重入 msgCheck 死锁。
+func (c *Checker) isAlreadyProcessed(blockNotice *types.BlockChangeNotification) bool {
+	if c.latestOuterBlockChangeNotification == nil || len(blockNotice.NewBlocks) == 0 {
+		return false
+	}
+	return blockNotice.NewBlocks[len(blockNotice.NewBlocks)-1].Hash == c.latestOuterBlockChangeNotification.Hash
+}
+
 func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
 	if c.latestOuterBlockChangeNotification != nil {
 		if len(blockNotice.DropBlocks) > 0 {
@@ -976,6 +986,12 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 	defer c.Unlock()
 	// 0. 消息校验
 	if c.isDuplicateBlockNotification(blockNotice) {
+		return true
+	}
+	// 幂等短路：本消息 new 链尾已等于 latest，说明上次已处理到 WriteNewBlockNotice
+	// 只是整条 Process 未提交（如 reorg 消息后续步骤失败）。直接提交前进，避免死锁重试。
+	if c.isAlreadyProcessed(blockNotice) {
+		log.Printf("msg already processed (latest == newBlocks tail), commit and advance")
 		return true
 	}
 	if !c.msgCheck(blockNotice) {
