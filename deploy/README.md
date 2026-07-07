@@ -73,7 +73,8 @@ listen: "0.0.0.0:8882"      # HTTP listen address (watch for port conflicts in h
 ready_ratio: 0.8             # Node readiness ratio (0.0~1.0); lower value increases tolerance
 check_num: 3                 # Node polling retry count
 check_interval_ms: 20        # Retry interval (ms)
-rpc_node_timeout_ms: 50      # Per-node RPC timeout (ms); increase for high-latency networks
+rpc_node_timeout_ms: 5000    # Per-node RPC timeout (ms); increase for high-latency networks
+node_offline_threshold: 3    # Consecutive failed health checks before a node is deleted from etcd
 etcd_lock_ttl: 20            # Distributed lock TTL (seconds); version mode only
 ```
 

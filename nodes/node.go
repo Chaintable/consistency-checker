@@ -129,12 +129,10 @@ func (node *Node) Check(kafkaLatestBlockNumber uint64, timeout time.Duration) No
 	} else {
 		nodeWithHeight.StateType = 2
 	}
+	// 仅记录状态变化。节点转为离线时先标记为 UpdateNode（在 etcd 中更新为离线态），
+	// 是否删除由连续失败次数（见 RWMap.ApplyOfflineThreshold）决定，避免单次超时即删除。
 	if node.StateType != nodeWithHeight.StateType {
-		if nodeWithHeight.StateType == 3 && node.Lease == 0 {
-			nodeWithHeight.ChangeType = DelNode
-		} else {
-			nodeWithHeight.ChangeType = UpdateNode
-		}
+		nodeWithHeight.ChangeType = UpdateNode
 	}
 	return nodeWithHeight
 }
