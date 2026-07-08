@@ -19,21 +19,18 @@ var (
 
 type RWMap struct {
 	// ip -> node meta
-	m map[string]Node
-	// ip -> 连续健康检查失败次数，用于延迟删除离线节点
-	offlineCounts map[string]int
-	lock          sync.RWMutex
-	watchCtx      context.Context
-	watchCancel   context.CancelFunc
-	etcdClient    *clientv3.Client
-	chainID       int64
-	version       string
+	m           map[string]Node
+	lock        sync.RWMutex
+	watchCtx    context.Context
+	watchCancel context.CancelFunc
+	etcdClient  *clientv3.Client
+	chainID     int64
+	version     string
 }
 
 func NewRWMap() *RWMap {
 	return &RWMap{
-		m:             make(map[string]Node),
-		offlineCounts: make(map[string]int),
+		m: make(map[string]Node),
 	}
 }
 
@@ -96,7 +93,6 @@ func (m *RWMap) DeleteByIP(ip string) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	delete(m.m, ip)
-	delete(m.offlineCounts, ip)
 }
 
 // Clear removes all nodes from the map
@@ -105,33 +101,6 @@ func (m *RWMap) Clear() {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	m.m = make(map[string]Node)
-	m.offlineCounts = make(map[string]int)
-}
-
-// ApplyOfflineThreshold 每个健康检查周期调用一次：累计每个节点的连续失败次数，
-// 当无 lease 的节点连续失败达到 threshold 次时，将其 ChangeType 升级为 DelNode 以触发删除；
-// 节点恢复（非离线）则清零计数。threshold<=0 时退化为单次失败即删除的旧行为。
-func (m *RWMap) ApplyOfflineThreshold(states []NodeWithHeight, threshold int) {
-	if threshold < 1 {
-		threshold = 1
-	}
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	for i := range states {
-		key := fmt.Sprintf("%s_%d", states[i].Address, states[i].Port)
-		if states[i].StateType != 3 {
-			delete(m.offlineCounts, key)
-			continue
-		}
-		m.offlineCounts[key]++
-		count := m.offlineCounts[key]
-		if count >= threshold && states[i].Node.Lease == 0 {
-			states[i].ChangeType = DelNode
-			log.Printf("node %s offline for %d consecutive checks (threshold %d), marking for deletion\n", key, count, threshold)
-		} else {
-			log.Printf("node %s offline for %d consecutive checks (threshold %d), keeping\n", key, count, threshold)
-		}
-	}
 }
 
 // reloadFromEtcd clears the map and reloads all data from etcd

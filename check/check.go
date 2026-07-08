@@ -785,10 +785,6 @@ func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
 	}
 
 	replicaStateChange, err := c.checkWithReTry(kafkaLatestBlockNumber)
-	// 每个检查周期统计一次连续失败次数：只有连续失败达到阈值的无 lease 节点才升级为 DelNode。
-	if replicaStateChange != nil {
-		nodes.NodeMap.ApplyOfflineThreshold(replicaStateChange.ReplicaStates, c.config.NodeOfflineThreshold)
-	}
 	if err != nil {
 		log.Printf("check error %+v", err)
 		if replicaStateChange != nil {

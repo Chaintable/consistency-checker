@@ -32,7 +32,6 @@ type Config struct {
 	VersionCheckInterval      int      `yaml:"version_check_interval"`        // 版本检查间隔(秒)
 	ForkScanInterval          int      `yaml:"fork_scan_interval_sec"`        // fork标记巡检间隔(秒)，<=0禁用
 	ForkScanLookback          uint64   `yaml:"fork_scan_lookback"`            // fork标记巡检回看的高度数
-	NodeOfflineThreshold      int      `yaml:"node_offline_threshold"`        // 连续多少次健康检查失败后，才从etcd删除该节点
 }
 
 var defaultConfig = Config{
@@ -46,7 +45,6 @@ var defaultConfig = Config{
 	VersionCheckInterval: 5, // 5 seconds default
 	ForkScanInterval:     60,
 	ForkScanLookback:     64,
-	NodeOfflineThreshold: 3,
 }
 
 // IsVersionMode 判断是否启用版本模式

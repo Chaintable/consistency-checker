@@ -84,7 +84,6 @@ docker run consistency-checker -config /path/to/config.yml
 | `check_num` | `3` | Number of retry attempts for node polling |
 | `check_interval_ms` | `20` | Delay between retries (ms) |
 | `rpc_node_timeout_ms` | `5000` | Timeout per node RPC call (ms) |
-| `node_offline_threshold` | `3` | Consecutive failed health checks before a node is deleted from etcd |
 | `msg_wait_timeout` | `5000` | Kafka message fetch timeout (ms) |
 | `consistency_db_path` | - | Pebble DB data directory |
 | `outer_s3_bucket` | - | S3 bucket for block validation data |
