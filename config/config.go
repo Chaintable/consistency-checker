@@ -38,7 +38,7 @@ var defaultConfig = Config{
 	Listen:               ":8663",
 	ReadyRatio:           0.8,
 	CheckInterval:        20,
-	RpcNodeTimeout:       50,
+	RpcNodeTimeout:       5000,
 	MsgWaitTimeout:       5000,
 	EtcdWriteTimeout:     5000, // 5 seconds default
 	EtcdLockTTL:          20,

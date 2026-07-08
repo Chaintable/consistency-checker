@@ -83,7 +83,7 @@ docker run consistency-checker -config /path/to/config.yml
 | `ready_ratio` | `0.8` | 副本节点就绪比例阈值 |
 | `check_num` | `3` | 节点轮询重试次数 |
 | `check_interval_ms` | `20` | 重试间隔（毫秒） |
-| `rpc_node_timeout_ms` | `50` | 单节点 RPC 超时（毫秒） |
+| `rpc_node_timeout_ms` | `5000` | 单节点 RPC 超时（毫秒） |
 | `msg_wait_timeout` | `5000` | Kafka 消息拉取超时（毫秒） |
 | `consistency_db_path` | - | Pebble DB 数据目录 |
 | `outer_s3_bucket` | - | S3 存储桶名称 |
