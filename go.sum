@@ -1,5 +1,5 @@
-github.com/Chaintable/pipeline v0.0.61 h1:HzD40ieLM9hVbeUFIhYJDjoXuilw82OLDsmukOMEqQs=
-github.com/Chaintable/pipeline v0.0.61/go.mod h1:l0GT8LwhbRwaxrLze5FjDv3lHgxxqdf9opAVjJtXNh4=
+github.com/Chaintable/pipeline v0.0.66 h1:WP3iTAcMBb6zZZMmANnE4xwaVFuJfK7/v+fcO1c9BSQ=
+github.com/Chaintable/pipeline v0.0.66/go.mod h1:l0GT8LwhbRwaxrLze5FjDv3lHgxxqdf9opAVjJtXNh4=
 github.com/DataDog/zstd v1.5.6 h1:LbEglqepa/ipmmQJUDnSsfvA8e8IStVcGaFWDuxvGOY=
 github.com/DataDog/zstd v1.5.6/go.mod h1:g4AWEaM3yOg3HYfnJ3YIawPnVdXJh9QME85blwSAmyw=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=

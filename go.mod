@@ -5,7 +5,7 @@ go 1.23.0
 toolchain go1.23.9
 
 require (
-	github.com/Chaintable/pipeline v0.0.61
+	github.com/Chaintable/pipeline v0.0.66
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.66.3
 	github.com/cockroachdb/pebble v1.1.2
 	github.com/ethereum/go-ethereum v1.15.11
