@@ -1332,10 +1332,11 @@ shutdown:
 	}
 	c.outerSingletonNewBlockWriter.Close()
 	nodes.NodeMap.StopWatch()
-	c.etcdClient.Close()
+
 	if c.etcdLock != nil {
 		c.etcdLock.Release()
 	}
+	c.etcdClient.Close()
 }
 
 // 获取最后一个OuterBlockChangeNotification
