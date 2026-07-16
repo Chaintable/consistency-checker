@@ -1,15 +1,12 @@
 name: build
 
 # CI + dev images. Versioned/release images are handled by release.yml (separate file).
-# STANDARD = push-on-PR: every event builds AND pushes a SHA-tagged image, so you can
+# STANDARD = push-on-PR: PR builds AND push a SHA-tagged dev image, so you can
 # `docker pull` the PR image and test it before merging. Do NOT gate the push off on PR.
 #   - pull_request -> build + push a SHA-tagged dev image (+ manifest)
-#   - push to main -> same
 #   - workflow_dispatch -> same
 on:
   pull_request:
-    branches: [main]
-  push:
     branches: [main]
   workflow_dispatch:
 
