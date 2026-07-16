@@ -51,6 +51,7 @@ type Checker struct {
 	// 上次写入etcd的LatestBlockNumber
 	lastWrittenBlockNumber uint64
 	quit                   chan struct{}
+	done                   chan struct{}
 }
 
 func NewChecker(config *config.Config) (*Checker, error) {
@@ -95,6 +96,7 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		etcdClient:                   etcdClient,
 		config:                       config,
 		quit:                         make(chan struct{}),
+		done:                         make(chan struct{}),
 	}
 
 	// 版本模式：初始化版本相关的组件
@@ -242,10 +244,16 @@ func (c *Checker) InitLeaderFromEtcd() error {
 	return nil
 }
 
-func (c *Checker) Close() {
+// Close requests shutdown and waits for Run to release all resources.
+func (c *Checker) Close(ctx context.Context) error {
 	close(c.quit)
-	time.Sleep(1 * time.Second)
-	db.DB.Close()
+
+	select {
+	case <-c.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Checker) getVersionBlockByHash(hash common.Hash) (*types.BlockContext, error) {
@@ -1268,11 +1276,14 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 }
 
 func (c *Checker) Run() {
+	defer close(c.done)
+	defer c.shutdown()
+
 	go c.runForkScan()
 	for {
 		select {
 		case <-c.quit:
-			goto shutdown
+			return
 		default:
 			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.config.MsgWaitTimeout)*time.Millisecond)
 			msg, err := c.innerNewBlockReader.FetchMessage(ctx)
@@ -1325,16 +1336,23 @@ func (c *Checker) Run() {
 		}
 	}
 
-shutdown:
+}
+
+func (c *Checker) shutdown() {
+	nodes.NodeMap.StopWatch()
+	c.RevokeChainLeader()
 	c.innerNewBlockReader.Close()
 	if c.outerVersionNewBlockWriter != nil {
 		c.outerVersionNewBlockWriter.Close()
 	}
 	c.outerSingletonNewBlockWriter.Close()
-	nodes.NodeMap.StopWatch()
-	c.etcdClient.Close()
-	if c.etcdLock != nil {
-		c.etcdLock.Release()
+	if err := c.etcdClient.Close(); err != nil {
+		log.Printf("close etcd client error %+v", err)
+	}
+	if db.DB != nil {
+		if err := db.DB.Close(); err != nil {
+			log.Printf("close consistency db error %+v", err)
+		}
 	}
 }
 
