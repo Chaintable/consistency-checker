@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Chaintable/consistency-checker/metrics"
 
@@ -64,7 +66,11 @@ func main() {
 
 	sig := <-sigChan
 
-	checker.Close()
-
 	log.Printf("[main] sig %v received, shutting down...", sig)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := checker.Close(shutdownCtx); err != nil {
+		log.Printf("[main] graceful shutdown timed out: %v", err)
+	}
+
 }
