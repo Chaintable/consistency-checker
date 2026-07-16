@@ -1,9 +1,17 @@
-name: release
+name: build
 
-# Versioned images, fired by a GitHub Release. The release TAG NAME becomes the image tag.
+# CI + dev images. Versioned/release images are handled by release.yml (separate file).
+# STANDARD = push-on-PR: every event builds AND pushes a SHA-tagged image, so you can
+# `docker pull` the PR image and test it before merging. Do NOT gate the push off on PR.
+#   - pull_request -> build + push a SHA-tagged dev image (+ manifest)
+#   - push to main -> same
+#   - workflow_dispatch -> same
 on:
-  release:
-    types: [created, released]
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 env:
   AWS_REGION: us-east-1
@@ -64,15 +72,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-      id-token: write
+      id-token: write        # REQUIRED — without it the OIDC role assume fails ("Could not load credentials")
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set revision (release tag name)
-        # GITHUB_REF is refs/tags/<tag> on a release event -> REVISION = <tag>. Use the git ref,
-        # NOT github.event.release.tag_name, so re-runs stay stable.
-        run: echo "REVISION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+      - name: Set revision (commit SHA)
+        run: echo "REVISION=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -80,13 +86,15 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          # Org-level secret (visibility=all). New Chaintable repos inherit it automatically.
+          # The IAM role github-actions-ecr-public trusts repo:Chaintable/*:* and can push to public ECR.
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Public ECR
         uses: aws-actions/amazon-ecr-login@v2
         with:
-          registry-type: public
+          registry-type: public          # REQUIRED for public.ecr.aws (default is private ECR login -> push 403)
 
       - name: Build & Push (per-arch)
         uses: docker/build-push-action@v6
@@ -94,7 +102,7 @@ jobs:
           context: .
           file: ${{ env.DOCKERFILE }}
           platforms: linux/${{ matrix.arch }}
-          push: true
+          push: true                       # push-on-PR standard: PR pushes a SHA image you can pull + test. Do NOT gate this on `!= pull_request`.
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.REVISION }}-${{ matrix.arch }}
           cache-from: type=gha,scope=build-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
@@ -104,6 +112,7 @@ jobs:
   manifest:
     name: merge-manifest
     needs: build
+    # No event gate: PR pushed per-arch images too (push-on-PR), so merge the manifest on PR as well.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -112,8 +121,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set revision (release tag name)
-        run: echo "REVISION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+      - name: Set revision (commit SHA)
+        run: echo "REVISION=$(git rev-parse --short=8 HEAD)" >> $GITHUB_ENV
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -129,11 +138,10 @@ jobs:
         with:
           registry-type: public
 
-      - name: Merge multi-arch manifest + latest
+      - name: Merge multi-arch manifest
         run: |
           docker buildx imagetools create \
             -t ${REGISTRY}/${IMAGE_NAME}:${REVISION} \
-            -t ${REGISTRY}/${IMAGE_NAME}:latest \
             ${REGISTRY}/${IMAGE_NAME}:${REVISION}-amd64 \
             ${REGISTRY}/${IMAGE_NAME}:${REVISION}-arm64
 
