@@ -3,7 +3,7 @@ name: release
 # Versioned images, fired by a GitHub Release. The release TAG NAME becomes the image tag.
 on:
   release:
-    types: [created, released]
+    types: [published]
 
 env:
   AWS_REGION: us-east-1
