@@ -46,7 +46,7 @@ var (
 		Namespace: "pipeline",
 		Name:      "block_ingress_to_outer_kafka_seconds",
 		Help:      "Time from block ingress at the writer to a successful outer Kafka write.",
-		Buckets:   prometheus.ExponentialBuckets(0.05, 2, 15),
+		Buckets:   prometheus.ExponentialBuckets(0.05, 1.5, 15),
 	}, []string{"destination"})
 
 	BlockIngressTimingIgnored = prometheus.NewCounterVec(prometheus.CounterOpts{
