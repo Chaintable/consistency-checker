@@ -54,6 +54,11 @@ type Checker struct {
 	done                   chan struct{}
 }
 
+const (
+	outerVersionDestination   = "version"
+	outerSingletonDestination = "singleton"
+)
+
 func NewChecker(config *config.Config) (*Checker, error) {
 	err := db.OpenConsistencyDB(config.ConsistencyDBPath)
 	if err != nil {
@@ -992,7 +997,7 @@ func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
 	return true
 }
 
-func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
+func (c *Checker) Process(blockNotice *types.BlockChangeNotification, blockTimings map[common.Hash]time.Time) bool {
 	c.Lock()
 	defer c.Unlock()
 	// 0. 消息校验
@@ -1046,7 +1051,7 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification) bool {
 	}
 
 	// 6. 发送新块通知
-	if !c.WriteNewBlockNotice(newBlocks) {
+	if !c.WriteNewBlockNotice(newBlocks, blockTimings) {
 		log.Printf("write new block notice error")
 		return false
 	}
@@ -1237,7 +1242,28 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 	return true
 }
 
-func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
+func blockEndToEndLatency(now time.Time, hash common.Hash, blockTimings map[common.Hash]time.Time) (time.Duration, string, bool) {
+	firstSeenAt, ok := blockTimings[hash]
+	if !ok {
+		return 0, "missing", false
+	}
+	latency := now.Sub(firstSeenAt)
+	if latency < 0 {
+		return 0, "future", false
+	}
+	return latency, "", true
+}
+
+func observeBlockEndToEndLatency(block types.BlockContext, blockTimings map[common.Hash]time.Time, destination string) {
+	latency, reason, ok := blockEndToEndLatency(time.Now(), block.Hash, blockTimings)
+	if !ok {
+		metrics.BlockIngressTimingIgnored.WithLabelValues(destination, reason).Inc()
+		return
+	}
+	metrics.BlockIngressToOuterKafkaLatency.WithLabelValues(destination).Observe(latency.Seconds())
+}
+
+func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext, blockTimings map[common.Hash]time.Time) bool {
 	for _, block := range newBlocks {
 		metrics.LatestPushedBlockNumber.Set(float64(block.BlockNumber))
 		metrics.LatestPushedBlockTime.Set(float64(block.Timestamp))
@@ -1255,12 +1281,14 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 				log.Printf("write new block notice error %+v", err)
 				return false
 			}
+			observeBlockEndToEndLatency(block, blockTimings, outerVersionDestination)
 			if c.etcdLock != nil && c.isOuterSingletonAlign {
 				err = util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
 				if err != nil {
 					log.Printf("write new block notice to singleton error %+v", err)
 					return false
 				}
+				observeBlockEndToEndLatency(block, blockTimings, outerSingletonDestination)
 			}
 		} else {
 			// 非版本模式：直接写入 singleton topic
@@ -1269,6 +1297,7 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext) bool {
 				log.Printf("write new block notice error %+v", err)
 				return false
 			}
+			observeBlockEndToEndLatency(block, blockTimings, outerSingletonDestination)
 		}
 		c.latestOuterBlockChangeNotification = b
 	}
@@ -1306,12 +1335,13 @@ func (c *Checker) Run() {
 				time.Sleep(1 * time.Second)
 				continue
 			}
+			blockTimings := util.DecodeBlockFirstSeenHeaders(msg.Headers)
 			for {
 				if c.latestMsgOffset != 0 && msg.Offset <= c.latestMsgOffset {
 					log.Printf("msg offset %d is same as last offset %d", msg.Offset, c.latestMsgOffset)
 					break
 				}
-				if !c.Process(blockNotice) {
+				if !c.Process(blockNotice, blockTimings) {
 					log.Printf("process error, retrying msg offset %d", msg.Offset)
 					time.Sleep(1 * time.Second)
 					continue

@@ -2,11 +2,39 @@ package check
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Chaintable/consistency-checker/config"
 	"github.com/Chaintable/pipeline/types"
 	"github.com/ethereum/go-ethereum/common"
 )
+
+func TestBlockEndToEndLatency(t *testing.T) {
+	hash := common.HexToHash("0x1234")
+	now := time.Date(2026, time.August, 10, 12, 0, 5, 0, time.UTC)
+	timings := map[common.Hash]time.Time{
+		hash: now.Add(-5 * time.Second),
+	}
+
+	latency, reason, ok := blockEndToEndLatency(now, hash, timings)
+	if !ok || reason != "" || latency != 5*time.Second {
+		t.Fatalf("blockEndToEndLatency() = (%v, %q, %v), want (5s, empty, true)", latency, reason, ok)
+	}
+}
+
+func TestBlockEndToEndLatencyRejectsMissingAndFutureTiming(t *testing.T) {
+	hash := common.HexToHash("0x1234")
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+
+	if _, reason, ok := blockEndToEndLatency(now, hash, nil); ok || reason != "missing" {
+		t.Fatalf("missing timing returned reason %q, ok %v", reason, ok)
+	}
+	if _, reason, ok := blockEndToEndLatency(now, hash, map[common.Hash]time.Time{
+		hash: now.Add(time.Second),
+	}); ok || reason != "future" {
+		t.Fatalf("future timing returned reason %q, ok %v", reason, ok)
+	}
+}
 
 func TestBlockValidationPathLegacy(t *testing.T) {
 	checker := &Checker{

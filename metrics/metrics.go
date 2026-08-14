@@ -41,9 +41,23 @@ var (
 		Namespace: "pipeline",
 		Name:      "drop_block_rewrite_failures_total",
 	})
+
+	BlockIngressToOuterKafkaLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "pipeline",
+		Name:      "block_ingress_to_outer_kafka_seconds",
+		Help:      "Time from block ingress at the writer to a successful outer Kafka write.",
+		Buckets:   prometheus.ExponentialBuckets(0.05, 1.5, 15),
+	}, []string{"destination"})
+
+	BlockIngressTimingIgnored = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "pipeline",
+		Name:      "block_ingress_timing_ignored_total",
+		Help:      "Block latency samples ignored because ingress timing was unavailable or invalid.",
+	}, []string{"destination", "reason"})
 )
 
 func init() {
 	prometheus.MustRegister(NodeInfo, LatestPushedBlockNumber, LatestPushedBlockTime,
-		ForkScanRewrites, ForkScanSkips, ForkScanErrors, DropBlockRewriteFailures)
+		ForkScanRewrites, ForkScanSkips, ForkScanErrors, DropBlockRewriteFailures,
+		BlockIngressToOuterKafkaLatency, BlockIngressTimingIgnored)
 }
