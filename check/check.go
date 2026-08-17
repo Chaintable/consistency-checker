@@ -50,14 +50,67 @@ type Checker struct {
 	ReplicaLatestBlockNumber uint64
 	// 上次写入etcd的LatestBlockNumber
 	lastWrittenBlockNumber uint64
-	quit                   chan struct{}
-	done                   chan struct{}
+	// 当前正在处理的 inner 通知，以及它已成功投递到各 outer topic 的通知集合：
+	// 整条 Process 重试时据此跳过已写成功的目的地，既不重复投递也不漏投递
+	currentNotice noticeID
+	delivered     map[string]map[outerNoticeKey]struct{}
+	quit          chan struct{}
+	done          chan struct{}
+
+	// 限制预取 S3 请求的并发数，Checker 级共享，重试的 Process 不会各自再开一组
+	prefetchSem chan struct{}
+
+	// 以下两个函数字段默认指向真实实现，测试中可替换
+	checkReplicas func(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error)
+	writeOuter    func(writer *kafka.Writer, notice *types.OuterBlockChangeNotification) error
 }
+
+// s3RetryMaxWait 是单次 S3 读写累计重试等待的上限；退避从 50ms 起步、每次翻倍、封顶 1s。
+// writer 的 S3 上传是异步的，对象"还没到"通常只差几十毫秒，固定睡 1s 会白白拖慢整条链路。
+const s3RetryMaxWait = 3 * time.Second
 
 const (
 	outerVersionDestination   = "version"
 	outerSingletonDestination = "singleton"
 )
+
+// outerNoticeKey 唯一标识一条 outer 通知：同一个 hash 在 reorg 来回时会先后以 drop(IsFork=true)
+// 和 new(IsFork=false) 两种身份出现，所以要连同 IsFork 一起比较。
+type outerNoticeKey struct {
+	hash   common.Hash
+	isFork bool
+}
+
+// noticeID 标识一条 inner 通知；同一条消息的多次重试内容相同，不同消息的 new 链尾不同。
+type noticeID struct {
+	tail      common.Hash
+	newCount  int
+	dropCount int
+}
+
+// beginNotice 在开始处理一条 inner 通知时调用：换了新通知就清空"已投递"记录。
+func (c *Checker) beginNotice(n *types.BlockChangeNotification) {
+	id := noticeID{tail: n.NewBlocks[len(n.NewBlocks)-1].Hash, newCount: len(n.NewBlocks), dropCount: len(n.DropBlocks)}
+	if id != c.currentNotice {
+		c.currentNotice = id
+		c.delivered = nil
+	}
+}
+
+func (c *Checker) isDelivered(destination string, key outerNoticeKey) bool {
+	_, ok := c.delivered[destination][key]
+	return ok
+}
+
+func (c *Checker) markDelivered(destination string, key outerNoticeKey) {
+	if c.delivered == nil {
+		c.delivered = make(map[string]map[outerNoticeKey]struct{})
+	}
+	if c.delivered[destination] == nil {
+		c.delivered[destination] = make(map[outerNoticeKey]struct{})
+	}
+	c.delivered[destination][key] = struct{}{}
+}
 
 func NewChecker(config *config.Config) (*Checker, error) {
 	err := db.OpenConsistencyDB(config.ConsistencyDBPath)
@@ -102,7 +155,10 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		config:                       config,
 		quit:                         make(chan struct{}),
 		done:                         make(chan struct{}),
+		writeOuter:                   util.WriteOuterBlockNotice,
+		prefetchSem:                  make(chan struct{}, prefetchConcurrency),
 	}
+	c.checkReplicas = c.check
 
 	// 版本模式：初始化版本相关的组件
 	if config.IsVersionMode() {
@@ -369,13 +425,9 @@ func (c *Checker) GetCommonAncestor(localBlock, remoteBlock *types.BlockContext)
 	return commonAncestor, localAncestors, remoteAncestors, nil
 }
 
-func (c *Checker) getRawValidation(blockCtx *types.BlockContext) (*types.BlockValidation, error) {
-	return c.getRawValidationByKey(c.blockValidationKey(blockCtx))
-}
-
-func (c *Checker) getRawValidationByKey(s3Key string) (*types.BlockValidation, error) {
+func (c *Checker) getRawValidationByKeyCtx(ctx context.Context, s3Key string) (*types.BlockValidation, error) {
 	obj, err := c.outerS3Reader.GetObject(
-		context.Background(),
+		ctx,
 		&s3.GetObjectInput{
 			Bucket: &c.config.OuterS3Bucket,
 			Key:    &s3Key,
@@ -395,50 +447,55 @@ func (c *Checker) getRawValidationByKey(s3Key string) (*types.BlockValidation, e
 	return &validation, nil
 }
 
-func (c *Checker) getValidationHash(blockCtx *types.BlockContext) (int64, error) {
-	validation, err := c.getRawValidation(blockCtx)
-	if err != nil {
-		return 0, err
-	}
-	return validation.ValidationHash, nil
-}
-
-func (c *Checker) getValidationHashWithReTry(blockCtx *types.BlockContext) (int64, error) {
-	for i := 0; i < 3; i++ {
-		validationHash, err := c.getValidationHash(blockCtx)
-		if err != nil {
-			log.Printf("get validation hash error %+v", err)
-		} else {
-			return validationHash, nil
+// retryWithBackoff 反复执行 fn 直到成功；失败时以 50ms 起步、每次翻倍、封顶 1s 的间隔重试，
+// 累计等待达到 maxWait 后返回最后一次错误。收到 quit 或 ctx 取消时立即返回当前错误。
+func (c *Checker) retryWithBackoff(ctx context.Context, what string, maxWait time.Duration, fn func() error) error {
+	backoff := 50 * time.Millisecond
+	var waited time.Duration
+	for {
+		err := fn()
+		if err == nil {
+			return nil
 		}
-		time.Sleep(1 * time.Second)
+		if waited >= maxWait {
+			return fmt.Errorf("%s: retries exhausted after %v: %w", what, waited, err)
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		log.Printf("%s error, retrying in %v: %+v", what, backoff, err)
+		select {
+		case <-c.quit:
+			return err
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+		waited += backoff
+		if backoff < time.Second {
+			backoff *= 2
+			if backoff > time.Second {
+				backoff = time.Second
+			}
+		}
 	}
-	return 0, fmt.Errorf("get validation hash many times but not ready")
 }
 
 func (c *Checker) getRawValidationByKeyWithReTry(s3Key string) (*types.BlockValidation, error) {
-	for i := 0; i < 3; i++ {
-		validation, err := c.getRawValidationByKey(s3Key)
-		if err != nil {
-			log.Printf("get raw validation error %+v", err)
-		} else {
-			return validation, nil
-		}
-		time.Sleep(1 * time.Second)
-	}
-	return nil, fmt.Errorf("get raw validation many times but not ready")
+	return c.getRawValidationByKeyWithReTryCtx(context.Background(), s3Key)
 }
 
-func (c *Checker) getValidationHashMany(newBlocks []types.BlockContext) ([]int64, error) {
-	validationHashes := make([]int64, len(newBlocks))
-	var err error
-	for i, block := range newBlocks {
-		validationHashes[i], err = c.getValidationHashWithReTry(&block)
-		if err != nil {
-			return nil, err
-		}
+func (c *Checker) getRawValidationByKeyWithReTryCtx(ctx context.Context, s3Key string) (*types.BlockValidation, error) {
+	var validation *types.BlockValidation
+	err := c.retryWithBackoff(ctx, "get raw validation "+s3Key, s3RetryMaxWait, func() error {
+		var err error
+		validation, err = c.getRawValidationByKeyCtx(ctx, s3Key)
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return validationHashes, nil
+	return validation, nil
 }
 
 func (c *Checker) rewriteValidationAtKey(s3Key string, validation *types.BlockValidation) error {
@@ -487,6 +544,10 @@ func (c *Checker) blockValidationHashFromKey(key string) (string, bool) {
 }
 
 func (c *Checker) listBlockValidationKeys(blockNumber uint64) ([]string, error) {
+	return c.listBlockValidationKeysCtx(context.Background(), blockNumber)
+}
+
+func (c *Checker) listBlockValidationKeysCtx(ctx context.Context, blockNumber uint64) ([]string, error) {
 	prefix := c.blockValidationPrefix(blockNumber)
 	var keys []string
 	var continuationToken *string
@@ -500,17 +561,13 @@ func (c *Checker) listBlockValidationKeys(blockNumber uint64) ([]string, error) 
 		}
 
 		var resp *s3.ListObjectsV2Output
-		var err error
-		for i := 0; i < 3; i++ {
-			resp, err = c.outerS3Reader.ListObjectsV2(context.Background(), listParams)
-			if err == nil {
-				break
-			}
-			log.Printf("list objects at height %d error: %+v", blockNumber, err)
-			time.Sleep(1 * time.Second)
-		}
+		err := c.retryWithBackoff(ctx, fmt.Sprintf("list objects at height %d", blockNumber), s3RetryMaxWait, func() error {
+			var err error
+			resp, err = c.outerS3Reader.ListObjectsV2(ctx, listParams)
+			return err
+		})
 		if err != nil {
-			return nil, fmt.Errorf("list objects at height %d error: %w", blockNumber, err)
+			return nil, err
 		}
 
 		for _, obj := range resp.Contents {
@@ -539,17 +596,9 @@ func (c *Checker) rewriteBlockWithRetry(blockCtx *types.BlockContext, validation
 }
 
 func (c *Checker) rewriteValidationAtKeyWithRetry(s3Key string, blockNumber uint64, hash string, validation *types.BlockValidation) error {
-	var err error
-	for i := 0; i < 3; i++ {
-		err = c.rewriteValidationAtKey(s3Key, validation)
-		if err == nil {
-			return nil
-		}
-		log.Printf("rewrite block %s at height %d error: %+v",
-			hash, blockNumber, err)
-		time.Sleep(1 * time.Second)
-	}
-	return err
+	return c.retryWithBackoff(context.Background(), fmt.Sprintf("rewrite block %s at height %d", hash, blockNumber), s3RetryMaxWait, func() error {
+		return c.rewriteValidationAtKey(s3Key, validation)
+	})
 }
 
 // rewriteDropBlocks 将被drop的块的validation标记为fork。
@@ -579,81 +628,145 @@ func (c *Checker) rewriteDropBlocks(dropBlocks []types.BlockContext) {
 	}
 }
 
-// rewriteForkBlocksAtSameHeight 检查S3中相同高度但不同hash的区块，将其标记为fork, 严格
-func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext) error {
-	for _, block := range newBlocks {
-		for i := 0; i < 3; i++ {
-			done, err := c.rewriteForkBlocksAtHeight(block)
+// rewriteForkBlocksAtSameHeight 检查S3中相同高度但不同hash的区块，将其标记为fork, 严格。
+// prefetched 是 Process 开头在等副本期间预取的同高度 key 列表与 canonical validation，
+// 第一轮直接复用以省掉关键路径上的 S3 往返；若第一轮有改写，后续轮次重新 LIST 确认收敛。
+func (c *Checker) rewriteForkBlocksAtSameHeight(newBlocks []types.BlockContext, prefetched []*blockPrefetch) error {
+	for i, block := range newBlocks {
+		var hint *blockPrefetch
+		if i < len(prefetched) {
+			hint = prefetched[i]
+		}
+		for attempt := 0; attempt < 3; attempt++ {
+			done, err := c.rewriteForkBlocksAtHeight(block, hint)
 			if err != nil {
 				return err
 			}
 			if done {
 				break
 			}
-			if i == 2 {
+			if attempt == 2 {
 				return fmt.Errorf("rewrite fork blocks at height %d did not converge, canonical hash %s",
 					block.BlockNumber, block.Hash.String())
 			}
-			time.Sleep(1 * time.Second)
+			hint = nil
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 	return nil
 }
 
-func (c *Checker) rewriteForkBlocksAtHeight(block types.BlockContext) (bool, error) {
-	keys, err := c.listBlockValidationKeys(block.BlockNumber)
-	if err != nil {
-		return false, err
+// forkRewrite 是一次待执行的 validation 改写：把 key 对应对象的 IsFork 改成 validation.IsFork。
+type forkRewrite struct {
+	key        string
+	hash       string
+	validation *types.BlockValidation
+}
+
+// planForkRewrites 只读地计算某高度上需要改写的 fork 标记：非 canonical 的对象应为 IsFork=true，
+// canonical 应为 IsFork=false。不持有 c.Lock，可在巡检里与消息处理并发执行。
+// hint 提供预取的 key 列表与 canonical validation：keys 为空时重新 LIST；预取列表里没有 canonical
+// （对象可能刚上传）时也会重新 LIST 一次再判定。
+func (c *Checker) planForkRewrites(block types.BlockContext, hint *blockPrefetch) ([]forkRewrite, error) {
+	canonicalHash := block.Hash.String()
+	var keys []string
+	var canonicalValidation *types.BlockValidation
+	if hint != nil && hint.keysErr == nil {
+		keys = hint.keys
+		if hint.validationErr == nil {
+			canonicalValidation = hint.validation
+		}
+	}
+	listed := false
+	if keys == nil {
+		var err error
+		if keys, err = c.listBlockValidationKeys(block.BlockNumber); err != nil {
+			return nil, err
+		}
+		listed = true
+	}
+	hasCanonical := func(keys []string) bool {
+		for _, key := range keys {
+			if h, ok := c.blockValidationHashFromKey(key); ok && strings.EqualFold(h, canonicalHash) {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasCanonical(keys) && !listed {
+		var err error
+		if keys, err = c.listBlockValidationKeys(block.BlockNumber); err != nil {
+			return nil, err
+		}
 	}
 
-	canonicalHash := block.Hash.String()
+	var plan []forkRewrite
 	canonicalFound := false
-	rewrote := false
-
 	for _, key := range keys {
 		existingHashStr, ok := c.blockValidationHashFromKey(key)
 		if !ok {
 			continue
 		}
-
 		isCanonical := strings.EqualFold(existingHashStr, canonicalHash)
+		var validation *types.BlockValidation
 		if isCanonical {
 			canonicalFound = true
+			validation = canonicalValidation
 		}
-
-		validation, err := c.getRawValidationByKeyWithReTry(key)
-		if err != nil {
-			return false, fmt.Errorf("get block validation error at height %d, hash %s: %w",
-				block.BlockNumber, existingHashStr, err)
+		if validation == nil {
+			var err error
+			validation, err = c.getRawValidationByKeyWithReTry(key)
+			if err != nil {
+				return nil, fmt.Errorf("get block validation error at height %d, hash %s: %w",
+					block.BlockNumber, existingHashStr, err)
+			}
 		}
-
 		shouldFork := !isCanonical
 		if validation.IsFork == shouldFork {
 			continue
 		}
-		validation.IsFork = shouldFork
-
-		if err := c.rewriteValidationAtKeyWithRetry(key, block.BlockNumber, existingHashStr, validation); err != nil {
-			return false, fmt.Errorf("rewrite block %s at height %d error: %w",
-				existingHashStr, block.BlockNumber, err)
-		}
-		rewrote = true
-		if shouldFork {
-			log.Printf("found fork block at height %d: existing hash %s, new canonical hash %s",
-				block.BlockNumber, existingHashStr, canonicalHash)
-			log.Printf("successfully marked block %s at height %d as fork",
-				existingHashStr, block.BlockNumber)
-		} else {
-			log.Printf("successfully marked block %s at height %d as canonical",
-				existingHashStr, block.BlockNumber)
-		}
+		rewritten := *validation
+		rewritten.IsFork = shouldFork
+		plan = append(plan, forkRewrite{key: key, hash: existingHashStr, validation: &rewritten})
 	}
-
 	if !canonicalFound {
-		return false, fmt.Errorf("canonical block %s at height %d not found in S3",
+		return nil, fmt.Errorf("canonical block %s at height %d not found in S3",
 			canonicalHash, block.BlockNumber)
 	}
-	return !rewrote, nil
+	return plan, nil
+}
+
+// applyForkRewrites 执行 planForkRewrites 得到的改写。
+func (c *Checker) applyForkRewrites(block types.BlockContext, plan []forkRewrite) error {
+	canonicalHash := block.Hash.String()
+	for _, rw := range plan {
+		if err := c.rewriteValidationAtKeyWithRetry(rw.key, block.BlockNumber, rw.hash, rw.validation); err != nil {
+			return fmt.Errorf("rewrite block %s at height %d error: %w",
+				rw.hash, block.BlockNumber, err)
+		}
+		if rw.validation.IsFork {
+			log.Printf("found fork block at height %d: existing hash %s, new canonical hash %s",
+				block.BlockNumber, rw.hash, canonicalHash)
+			log.Printf("successfully marked block %s at height %d as fork",
+				rw.hash, block.BlockNumber)
+		} else {
+			log.Printf("successfully marked block %s at height %d as canonical",
+				rw.hash, block.BlockNumber)
+		}
+	}
+	return nil
+}
+
+// rewriteForkBlocksAtHeight 检查并改写某高度的 fork 标记，返回 done=true 表示无需改写（已收敛）。
+func (c *Checker) rewriteForkBlocksAtHeight(block types.BlockContext, hint *blockPrefetch) (bool, error) {
+	plan, err := c.planForkRewrites(block, hint)
+	if err != nil {
+		return false, err
+	}
+	if len(plan) == 0 {
+		return true, nil
+	}
+	return false, c.applyForkRewrites(block, plan)
 }
 
 // runForkScan 周期性巡检最近若干高度的fork标记。
@@ -691,41 +804,62 @@ func (c *Checker) scanRecentForkBlocks() {
 	if lookback := c.config.ForkScanLookback; tip >= lookback {
 		start = tip - lookback + 1
 	}
-	// 按高度分段持锁，避免整轮巡检阻塞消息处理
 	for h := start; h <= tip; h++ {
-		c.Lock()
 		c.scanForkBlocksAtHeight(h)
-		c.Unlock()
 	}
 }
 
-// scanForkBlocksAtHeight 巡检单个高度，调用方需持有c.Lock
+// scanForkBlocksAtHeight 巡检单个高度。S3 的 LIST/GET 不持 c.Lock 执行，避免每分钟一轮巡检
+// 挤占消息处理；只有真的需要改写时才持锁，并在持锁后复核 canonical 未被并发的 reorg 改变。
 func (c *Checker) scanForkBlocksAtHeight(height uint64) {
-	// 巡检期间可能reorg到更短链，tip之上的高度没有canonical，跳过
-	if c.latestOuterBlockChangeNotification == nil || height > c.latestOuterBlockChangeNotification.BlockNumber {
+	canonicalAt := func() (common.Hash, bool) {
+		// 巡检期间可能reorg到更短链，tip之上的高度没有canonical，跳过
+		if c.latestOuterBlockChangeNotification == nil || height > c.latestOuterBlockChangeNotification.BlockNumber {
+			return common.Hash{}, false
+		}
+		hash, ok, err := db.DB.GetCanonicalHashByNum(height)
+		if err != nil {
+			log.Printf("fork scan: get canonical hash at height %d error %+v", height, err)
+			metrics.ForkScanErrors.Inc()
+			return common.Hash{}, false
+		}
+		if !ok {
+			// db中没有该高度的记录（冷启动/丢盘），没有可信基准，跳过
+			metrics.ForkScanSkips.Inc()
+			return common.Hash{}, false
+		}
+		return hash, true
+	}
+
+	c.Lock()
+	hash, ok := canonicalAt()
+	c.Unlock()
+	if !ok {
 		return
 	}
-	hash, ok, err := db.DB.GetCanonicalHashByNum(height)
+	plan, err := c.planForkRewrites(types.BlockContext{BlockNumber: height, Hash: hash}, nil)
 	if err != nil {
-		log.Printf("fork scan: get canonical hash at height %d error %+v", height, err)
+		log.Printf("fork scan: plan at height %d error %+v", height, err)
 		metrics.ForkScanErrors.Inc()
 		return
 	}
-	if !ok {
-		// db中没有该高度的记录（冷启动/丢盘），没有可信基准，跳过
-		metrics.ForkScanSkips.Inc()
+	if len(plan) == 0 {
 		return
 	}
-	done, err := c.rewriteForkBlocksAtHeight(types.BlockContext{BlockNumber: height, Hash: hash})
-	if err != nil {
+
+	c.Lock()
+	defer c.Unlock()
+	if current, ok := canonicalAt(); !ok || current != hash {
+		// 计算期间该高度已被 reorg 改写，放弃这份过期计划，下一轮巡检重算
+		return
+	}
+	if err := c.applyForkRewrites(types.BlockContext{BlockNumber: height, Hash: hash}, plan); err != nil {
 		log.Printf("fork scan: rewrite at height %d error %+v", height, err)
 		metrics.ForkScanErrors.Inc()
 		return
 	}
-	if !done {
-		log.Printf("fork scan: rewrote fork marks at height %d", height)
-		metrics.ForkScanRewrites.Inc()
-	}
+	log.Printf("fork scan: rewrote fork marks at height %d", height)
+	metrics.ForkScanRewrites.Inc()
 }
 
 type ReplicaStateChangeNotification struct {
@@ -767,39 +901,72 @@ func (c *Checker) check(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotif
 	}
 }
 
-func (c *Checker) checkWithReTry(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error) {
-	var err error
+// waitReplicasReady 每隔 check_interval_ms 轮询一次副本，直到 ready_ratio 比例的副本追上
+// kafkaLatestBlockNumber，或累计等待超过 timeout。timeout<=0 时只查一次。
+// 副本（leafage）从收到同一条 inner 通知到应用完成通常只要几十毫秒，但尾部会超过固定次数的窗口；
+// 与其失败后整条 Process 睡 1s 重来，不如在这里多等几十毫秒。
+// 注意 timeout 约束的是轮询循环，每一轮 CheckAll 会等所有节点返回、受 rpc_node_timeout_ms 约束：
+// 某个副本 RPC 卡死时一轮仍可能耗到 rpc_node_timeout_ms（与改动前一致）。
+func (c *Checker) waitReplicasReady(kafkaLatestBlockNumber uint64, timeout time.Duration) (*ReplicaStateChangeNotification, error) {
+	start := time.Now()
+	deadline := start.Add(timeout)
+	interval := time.Duration(c.config.CheckInterval) * time.Millisecond
+	var lastErr error
 	var replicaStateChange *ReplicaStateChangeNotification
-	for i := 0; i < c.config.CheckNum; i++ {
-		replicaStateChange, err = c.check(kafkaLatestBlockNumber)
+	for {
+		var err error
+		replicaStateChange, err = c.checkReplicas(kafkaLatestBlockNumber)
 		if err != nil {
 			log.Printf("check error %+v", err)
+			lastErr = err
 		}
-		if replicaStateChange != nil {
-			if replicaStateChange.LatestBlockNumber != nil {
-				return replicaStateChange, nil
-			}
+		if replicaStateChange != nil && replicaStateChange.LatestBlockNumber != nil {
+			return replicaStateChange, nil
 		}
-		time.Sleep(time.Duration(c.config.CheckInterval) * time.Millisecond)
+		// 每轮 RPC 本身受 rpc_node_timeout_ms 约束（不在这里缩短：把慢节点误判 offline 会连带
+		// 从 etcd 摘除），所以只保证不会在过了 deadline 之后再发起新一轮
+		if !time.Now().Add(interval).Before(deadline) {
+			return replicaStateChange, fmt.Errorf("replicas not ready for block %d after %v: %v",
+				kafkaLatestBlockNumber, time.Since(start).Round(time.Millisecond), lastErr)
+		}
+		select {
+		case <-c.quit:
+			return replicaStateChange, fmt.Errorf("checker quitting")
+		case <-time.After(interval):
+		}
 	}
-	return replicaStateChange, fmt.Errorf("check many times but not ready: %v", err)
 }
 
+func (c *Checker) replicaWaitTimeout() time.Duration {
+	return time.Duration(c.config.CheckTimeout) * time.Millisecond
+}
+
+// CheckAndNotifyEtcd 是空闲时的周期性节点状态刷新。副本通常早已到达该高度，第一次采样就通过；
+// 只有节点真的不响应时才会用满窗口——节点要在整个 check_timeout_ms 内持续失败才会被判 offline
+// 并从 etcd 摘除，避免一次瞬时抖动就删掉注册。
 func (c *Checker) CheckAndNotifyEtcd() bool {
 	c.Lock()
 	defer c.Unlock()
-	return c.checkAndNotify(c.ReplicaLatestBlockNumber)
+	return c.checkAndNotify(c.ReplicaLatestBlockNumber, c.replicaWaitTimeout(), false)
 }
 
-func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64) bool {
+// checkAndNotify 等副本就绪并把节点状态写入 etcd；record 为 true 时记录副本等待指标（消息路径）。
+func (c *Checker) checkAndNotify(kafkaLatestBlockNumber uint64, timeout time.Duration, record bool) bool {
 	// 如果副本高度大于kafka最新高度，直接返回(一致性节点后上线)
 	if c.ReplicaLatestBlockNumber > kafkaLatestBlockNumber && time.Since(c.latestWriteEtcd) < 1*time.Second {
 		return true
 	}
 
-	replicaStateChange, err := c.checkWithReTry(kafkaLatestBlockNumber)
+	waitStart := time.Now()
+	replicaStateChange, err := c.waitReplicasReady(kafkaLatestBlockNumber, timeout)
+	if record {
+		metrics.ReplicaReadyWait.Observe(time.Since(waitStart).Seconds())
+	}
 	if err != nil {
 		log.Printf("check error %+v", err)
+		if record {
+			metrics.ReplicaReadyTimeouts.Inc()
+		}
 		if replicaStateChange != nil {
 			c.RemoveOfflineNodesFromEtcd(c.etcdClient, replicaStateChange)
 		}
@@ -943,14 +1110,90 @@ func (c *Checker) WriteReplicaStateChangeToEtcd(writer *clientv3.Client, replica
 	return nil
 }
 
-func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext) bool {
-	validationHashes, err := c.getValidationHashMany(newBlocks)
-	if err != nil {
-		log.Printf("get validation hash error %+v\n", err)
-		return false
+// blockPrefetch 是单个新块在等副本期间预取到的 S3 数据。
+type blockPrefetch struct {
+	validation    *types.BlockValidation
+	validationErr error
+	keys          []string
+	keysErr       error
+}
+
+type prefetchResult struct {
+	blocks []*blockPrefetch
+	wg     sync.WaitGroup
+	cancel context.CancelFunc
+}
+
+// wait 等全部预取完成（成功路径）
+func (p *prefetchResult) wait() {
+	p.wg.Wait()
+}
+
+// abort 取消仍在进行的预取（失败路径）：不阻塞等待，goroutine 收到取消后自行退出，
+// 避免每次 Process 重试都叠加一组新的 S3 请求
+func (p *prefetchResult) abort() {
+	p.cancel()
+}
+
+// prefetchConcurrency 限制并发预取的 S3 请求数（追块时一条通知可能带很多块）
+const prefetchConcurrency = 16
+
+// prefetchNewBlocks 并发预取每个新块的 validation 与同高度 key 列表。这两样只依赖消息内容、
+// 不依赖副本状态，放在等副本的窗口里并行拉，让关键路径上不再有串行的 S3 往返。
+func (c *Checker) prefetchNewBlocks(newBlocks []types.BlockContext) *prefetchResult {
+	ctx, cancel := context.WithCancel(context.Background())
+	res := &prefetchResult{blocks: make([]*blockPrefetch, len(newBlocks)), cancel: cancel}
+	if c.prefetchSem == nil {
+		c.prefetchSem = make(chan struct{}, prefetchConcurrency)
+	}
+	sem := c.prefetchSem
+	acquire := func() bool {
+		select {
+		case sem <- struct{}{}:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	for i := range newBlocks {
+		pf := &blockPrefetch{}
+		res.blocks[i] = pf
+		block := newBlocks[i]
+		key := c.blockValidationKey(&block)
+		res.wg.Add(2)
+		go func() {
+			defer res.wg.Done()
+			if !acquire() {
+				pf.validationErr = ctx.Err()
+				return
+			}
+			defer func() { <-sem }()
+			pf.validation, pf.validationErr = c.getRawValidationByKeyWithReTryCtx(ctx, key)
+		}()
+		go func() {
+			defer res.wg.Done()
+			if !acquire() {
+				pf.keysErr = ctx.Err()
+				return
+			}
+			defer func() { <-sem }()
+			pf.keys, pf.keysErr = c.listBlockValidationKeysCtx(ctx, block.BlockNumber)
+		}()
+	}
+	return res
+}
+
+func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext, prefetched []*blockPrefetch) bool {
+	validationHashes := make([]int64, len(newBlocks))
+	for i, block := range newBlocks {
+		if prefetched[i].validationErr != nil {
+			log.Printf("get validation hash for block %d %s error %+v", block.BlockNumber, block.Hash, prefetched[i].validationErr)
+			return false
+		}
+		validationHashes[i] = prefetched[i].validation.ValidationHash
 	}
 
-	err = db.DB.WriteBlockInfos(newBlocks, validationHashes)
+	err := db.DB.WriteBlockInfos(newBlocks, validationHashes)
 	if err != nil {
 		log.Printf("write block info error %+v", err)
 		return false
@@ -1000,68 +1243,91 @@ func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
 func (c *Checker) Process(blockNotice *types.BlockChangeNotification, blockTimings map[common.Hash]time.Time) bool {
 	c.Lock()
 	defer c.Unlock()
-	// 0. 消息校验
+	// 0. 消息校验。两条短路路径不跳过 singleton 对齐：上一轮可能在通知已发出之后、
+	//    对齐失败时返回 false，重试时若直接提交，singleton 要等下一条消息才会补齐。
 	if c.isDuplicateBlockNotification(blockNotice) {
-		return true
+		return c.AlignOuterSingleton()
 	}
 	// 幂等短路：本消息 new 链尾已等于 latest，说明上次已处理到 WriteNewBlockNotice
-	// 只是整条 Process 未提交（如 reorg 消息后续步骤失败）。直接提交前进，避免死锁重试。
+	// 只是整条 Process 未提交（如 reorg 消息后续步骤失败）。对齐后提交前进，避免死锁重试。
 	if c.isAlreadyProcessed(blockNotice) {
-		log.Printf("msg already processed (latest == newBlocks tail), commit and advance")
-		return true
+		log.Printf("msg already processed (latest == newBlocks tail), align and advance")
+		return c.AlignOuterSingleton()
 	}
 	if !c.msgCheck(blockNotice) {
 		log.Printf("msg check error")
 		return false
 	}
+	c.beginNotice(blockNotice)
+
+	start := time.Now()
 
 	// kafka最新高度
 	kafkaLatestBlockNumber := blockNotice.NewBlocks[len(blockNotice.NewBlocks)-1].BlockNumber
-
-	// 1. 一致性check，返回已就绪节点的最低高度
-	if !c.checkAndNotify(kafkaLatestBlockNumber) {
-		log.Printf("check and notify error")
-		return false
-	}
 
 	dropBlocks := append([]types.BlockContext(nil), blockNotice.DropBlocks...)
 	slices.Reverse(dropBlocks)
 
 	newBlocks := blockNotice.NewBlocks
 
-	// 2. 重写fork block
+	// 1. 预取 validation 与同高度 key 列表，与下面等副本的过程并行；
+	//    失败路径不等它们结束（goroutine 自行收尾，重试时会重新预取）
+	prefetched := c.prefetchNewBlocks(newBlocks)
+
+	// 2. 一致性check，等 ready_ratio 比例的副本追上高度
+	if !c.checkAndNotify(kafkaLatestBlockNumber, c.replicaWaitTimeout(), true) {
+		log.Printf("check and notify error")
+		prefetched.abort()
+		return false
+	}
+	prefetched.wait()
+
+	// 3. 重写fork block
 	c.rewriteDropBlocks(dropBlocks)
 
-	// 3. 写入db
-	if !c.writeBlockInfoToDB(blockNotice.NewBlocks) {
+	// 4. 写入db
+	if !c.writeBlockInfoToDB(newBlocks, prefetched.blocks) {
 		log.Printf("write block info to db error")
 		return false
 	}
 
-	// 4. 检查并重写S3中相同高度但不同hash的BlockValidation，标记IsFork=true
-	if err := c.rewriteForkBlocksAtSameHeight(newBlocks); err != nil {
+	// 5. 检查并重写S3中相同高度但不同hash的BlockValidation，标记IsFork=true
+	if err := c.rewriteForkBlocksAtSameHeight(newBlocks, prefetched.blocks); err != nil {
 		log.Printf("rewrite fork blocks at same height error %+v", err)
 		return false
 	}
 
-	// 5. 发送drop block通知
+	// 6. 发送drop block通知
 	if !c.WriteDropBlockNotice(dropBlocks) {
 		log.Printf("write drop block notice error")
 		return false
 	}
 
-	// 6. 发送新块通知
+	// 7. 发送新块通知
 	if !c.WriteNewBlockNotice(newBlocks, blockTimings) {
 		log.Printf("write new block notice error")
 		return false
 	}
 
-	// 7. 对于从切换成leader的情况，进行topic align
+	// 8. 对于从切换成leader的情况，进行topic align
 	if !c.AlignOuterSingleton() {
 		log.Printf("align outer singleton error")
 		return false
 	}
 
+	metrics.ProcessPublishDuration.Observe(time.Since(start).Seconds())
+
+	// 9. 通知已发出，再用一次新鲜的 LIST 复核同高度的 fork 标记：预取的列表是 Process 开头的
+	//    快照，等副本期间刚上传的同高度对象不在其中。这一步不在发布的关键路径上，
+	//    失败只记录，周期巡检兜底。
+	//    复用预取到的 canonical validation、但强制重新 LIST（hint 里 keys 置空即会重新列举）。
+	fresh := make([]*blockPrefetch, len(prefetched.blocks))
+	for i, pf := range prefetched.blocks {
+		fresh[i] = &blockPrefetch{validation: pf.validation, validationErr: pf.validationErr}
+	}
+	if err := c.rewriteForkBlocksAtSameHeight(newBlocks, fresh); err != nil {
+		log.Printf("post-publish fork recheck error %+v", err)
+	}
 	return true
 }
 
@@ -1144,7 +1410,7 @@ func (c *Checker) align(latestOuterVersionBlockChangeNotification, latestOuterSi
 				Timestamp:   uint64(time.Now().Unix()),
 				IsFork:      block.IsFork,
 			}
-			err = util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+			err = c.writeOuter(c.outerSingletonNewBlockWriter, b)
 			if err != nil {
 				return fmt.Errorf("failed to write block notice for height %d (hash: %s): %w", block.Height, block.ID.String(), err)
 			}
@@ -1181,7 +1447,7 @@ func (c *Checker) align(latestOuterVersionBlockChangeNotification, latestOuterSi
 				Timestamp:   block.Timestamp,
 				IsFork:      true,
 			}
-			err := util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+			err := c.writeOuter(c.outerSingletonNewBlockWriter, b)
 			if err != nil {
 				return fmt.Errorf("failed to write drop block notice %d/%d (height: %d, hash: %s): %w",
 					i+1, len(dropBlocks), block.BlockNumber, block.Hash.String(), err)
@@ -1197,7 +1463,7 @@ func (c *Checker) align(latestOuterVersionBlockChangeNotification, latestOuterSi
 				Timestamp:   block.Timestamp,
 				IsFork:      false,
 			}
-			err := util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
+			err := c.writeOuter(c.outerSingletonNewBlockWriter, b)
 			if err != nil {
 				return fmt.Errorf("failed to write new block notice %d/%d (height: %d, hash: %s): %w",
 					i+1, len(newBlocks), block.BlockNumber, block.Hash.String(), err)
@@ -1205,6 +1471,60 @@ func (c *Checker) align(latestOuterVersionBlockChangeNotification, latestOuterSi
 		}
 	}
 	return nil
+}
+
+// publishOuter 把一条 outer 通知写到该去的 topic：传统模式只有 singleton；版本模式写 version，
+// leader 且已对齐时同时写 singleton。目的地互不依赖，并发写以省掉一次串行的 Kafka 往返。
+// 任一目的地写失败返回 false，由调用方整条 Process 重试；已写成功的目的地记入 delivered，
+// 重试时跳过，因此重试既不会重复投递、也不会漏投递。
+//
+// observe 在某个目的地写成功时回调，at 是该目的地自己的完成时刻，用于端到端延迟打点。
+func (c *Checker) publishOuter(b *types.OuterBlockChangeNotification, observe func(destination string, at time.Time)) bool {
+	type target struct {
+		destination string
+		writer      *kafka.Writer
+	}
+	var targets []target
+	if c.config.IsVersionMode() {
+		targets = append(targets, target{outerVersionDestination, c.outerVersionNewBlockWriter})
+		if c.etcdLock != nil && c.isOuterSingletonAlign {
+			targets = append(targets, target{outerSingletonDestination, c.outerSingletonNewBlockWriter})
+		}
+	} else {
+		targets = append(targets, target{outerSingletonDestination, c.outerSingletonNewBlockWriter})
+	}
+
+	key := outerNoticeKey{hash: b.Hash, isFork: b.IsFork}
+	errs := make([]error, len(targets))
+	doneAt := make([]time.Time, len(targets))
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		if c.isDelivered(t.destination, key) {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, t target) {
+			defer wg.Done()
+			errs[i] = c.writeOuter(t.writer, b)
+			doneAt[i] = time.Now()
+		}(i, t)
+	}
+	wg.Wait()
+
+	ok := true
+	for i, t := range targets {
+		if c.isDelivered(t.destination, key) {
+			continue
+		}
+		if errs[i] != nil {
+			log.Printf("write outer %s block notice error at height %d hash %s: %+v", t.destination, b.BlockNumber, b.Hash, errs[i])
+			ok = false
+			continue
+		}
+		c.markDelivered(t.destination, key)
+		observe(t.destination, doneAt[i])
+	}
+	return ok
 }
 
 func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
@@ -1216,27 +1536,8 @@ func (c *Checker) WriteDropBlockNotice(dropBlocks []types.BlockContext) bool {
 			Timestamp:   block.Timestamp,
 			IsFork:      true,
 		}
-		// 版本模式：写入 version topic，并在 leader 时同步写入 singleton topic
-		if c.config.IsVersionMode() {
-			err := util.WriteOuterBlockNotice(c.outerVersionNewBlockWriter, b)
-			if err != nil {
-				log.Printf("write drop block notice error %+v", err)
-				return false
-			}
-			if c.etcdLock != nil && c.isOuterSingletonAlign {
-				err = util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
-				if err != nil {
-					log.Printf("write drop block notice to singleton error %+v", err)
-					return false
-				}
-			}
-		} else {
-			// 非版本模式：直接写入 singleton topic
-			err := util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
-			if err != nil {
-				log.Printf("write drop block notice error %+v", err)
-				return false
-			}
+		if !c.publishOuter(b, func(string, time.Time) {}) {
+			return false
 		}
 	}
 	return true
@@ -1254,8 +1555,8 @@ func blockEndToEndLatency(now time.Time, hash common.Hash, blockTimings map[comm
 	return latency, "", true
 }
 
-func observeBlockEndToEndLatency(block types.BlockContext, blockTimings map[common.Hash]time.Time, destination string) {
-	latency, reason, ok := blockEndToEndLatency(time.Now(), block.Hash, blockTimings)
+func observeBlockEndToEndLatency(block types.BlockContext, blockTimings map[common.Hash]time.Time, destination string, at time.Time) {
+	latency, reason, ok := blockEndToEndLatency(at, block.Hash, blockTimings)
 	if !ok {
 		metrics.BlockIngressTimingIgnored.WithLabelValues(destination, reason).Inc()
 		return
@@ -1274,30 +1575,10 @@ func (c *Checker) WriteNewBlockNotice(newBlocks []types.BlockContext, blockTimin
 			Timestamp:   block.Timestamp,
 			IsFork:      false,
 		}
-		// 版本模式：写入 version topic，并在 leader 时同步写入 singleton topic
-		if c.config.IsVersionMode() {
-			err := util.WriteOuterBlockNotice(c.outerVersionNewBlockWriter, b)
-			if err != nil {
-				log.Printf("write new block notice error %+v", err)
-				return false
-			}
-			observeBlockEndToEndLatency(block, blockTimings, outerVersionDestination)
-			if c.etcdLock != nil && c.isOuterSingletonAlign {
-				err = util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
-				if err != nil {
-					log.Printf("write new block notice to singleton error %+v", err)
-					return false
-				}
-				observeBlockEndToEndLatency(block, blockTimings, outerSingletonDestination)
-			}
-		} else {
-			// 非版本模式：直接写入 singleton topic
-			err := util.WriteOuterBlockNotice(c.outerSingletonNewBlockWriter, b)
-			if err != nil {
-				log.Printf("write new block notice error %+v", err)
-				return false
-			}
-			observeBlockEndToEndLatency(block, blockTimings, outerSingletonDestination)
+		if !c.publishOuter(b, func(destination string, at time.Time) {
+			observeBlockEndToEndLatency(block, blockTimings, destination, at)
+		}) {
+			return false
 		}
 		c.latestOuterBlockChangeNotification = b
 	}

@@ -71,8 +71,8 @@ outer_version_new_block_topic: "pipeline_1_v1"   # Version topic
 ```yaml
 listen: "0.0.0.0:8882"      # HTTP listen address (watch for port conflicts in host network mode)
 ready_ratio: 0.8             # Node readiness ratio (0.0~1.0); lower value increases tolerance
-check_num: 3                 # Node polling retry count
-check_interval_ms: 20        # Retry interval (ms)
+check_interval_ms: 20        # Replica polling interval (ms)
+check_timeout_ms: 2000       # Max wait for replicas to reach the notified height (ms)
 rpc_node_timeout_ms: 5000    # Per-node RPC timeout (ms); increase for high-latency networks
 etcd_lock_ttl: 20            # Distributed lock TTL (seconds); version mode only
 ```
@@ -195,12 +195,12 @@ No replica nodes registered in etcd. Verify:
 1. The etcd cluster is reachable
 2. Nodes are registered under the correct key prefix (`{chainID}/nodes/` or `{chainID}/{version}/nodes/`)
 
-### "check many times but not ready"
+### "replicas not ready for block N after ..."
 
 The replica node readiness ratio did not reach the `ready_ratio` threshold. Possible causes:
 - Replica nodes are still syncing
 - `rpc_node_timeout_ms` is too low, causing timeouts
-- Try increasing `check_num` or `check_interval_ms`
+- Try increasing `check_timeout_ms`
 
 ### "both version and outer_version_new_block_topic must be set or both must be empty"
 
