@@ -1403,11 +1403,16 @@ func (c *Checker) align(latestOuterVersionBlockChangeNotification, latestOuterSi
 			if err != nil {
 				return fmt.Errorf("failed to get block at height %d during alignment: %w", i, err)
 			}
+			// db 里没有区块时间戳，从 outer blockfile 取，保持与其他路径一致（之前误用了当前时间）
+			blockCtx, err := c.getVersionBlockByHash(block.ID)
+			if err != nil {
+				return fmt.Errorf("failed to get block %s at height %d during alignment: %w", block.ID.String(), i, err)
+			}
 			b := &types.OuterBlockChangeNotification{
 				BlockNumber: block.Height,
 				Hash:        block.ID,
 				ChainID:     c.config.ChainID,
-				Timestamp:   uint64(time.Now().Unix()),
+				Timestamp:   blockCtx.Timestamp,
 				IsFork:      block.IsFork,
 			}
 			err = c.writeOuter(c.outerSingletonNewBlockWriter, b)
