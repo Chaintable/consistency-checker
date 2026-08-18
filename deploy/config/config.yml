@@ -1,7 +1,7 @@
 listen: "0.0.0.0:8882"                                            # Default listening address
 ready_ratio: 0.8                                                  # Default readiness ratio
-check_num: 3                                                      # Default number of checks
-check_interval_ms: 20                                             # Default interval for checks in milliseconds
+check_interval_ms: 20                                             # Replica polling interval in milliseconds
+check_timeout_ms: 2000                                            # Max wait for replicas to reach the notified height in milliseconds
 chain_id: 1                                                       # Default Chain ID (e.g., 1)
 version: "abc"
 consistency_db_path: "/eth/consistency_db"                        # Default path for consistency database

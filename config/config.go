@@ -10,8 +10,9 @@ import (
 type Config struct {
 	Listen                    string   `yaml:"listen"`
 	ReadyRatio                float64  `yaml:"ready_ratio"`                   // 副本节点准备好的比例，达到后推送kafka
-	CheckNum                  int      `yaml:"check_num"`                     // 每次得知block更新后，check副本节点的次数
-	CheckInterval             int      `yaml:"check_interval_ms"`             // 每次check副本节点的间隔
+	CheckNum                  int      `yaml:"check_num"`                     // 已废弃：副本就绪改为在 check_timeout_ms 内持续轮询，此项仅为兼容旧配置保留、不再生效
+	CheckInterval             int      `yaml:"check_interval_ms"`             // 轮询副本节点的间隔(毫秒)
+	CheckTimeout              int      `yaml:"check_timeout_ms"`              // 轮询副本追上新块高度的时长上限(毫秒)，超时才算失败并进入1s重试；每一轮 RPC 本身仍受 rpc_node_timeout_ms 约束
 	RpcNodeTimeout            int      `yaml:"rpc_node_timeout_ms"`           // 每次check单副本节点RPC的超时时间
 	MsgWaitTimeout            int      `yaml:"msg_wait_timeout"`              // 每次check单副本节点RPC的间隔
 	ChainID                   int64    `yaml:"chain_id"`                      // 链ID
@@ -38,6 +39,7 @@ var defaultConfig = Config{
 	Listen:               ":8663",
 	ReadyRatio:           0.8,
 	CheckInterval:        20,
+	CheckTimeout:         2000,
 	RpcNodeTimeout:       5000,
 	MsgWaitTimeout:       5000,
 	EtcdWriteTimeout:     5000, // 5 seconds default

@@ -81,8 +81,9 @@ docker run consistency-checker -config /path/to/config.yml
 | `chain_id` | - | 区块链网络 ID（必填） |
 | `version` | - | 版本标识（与 `outer_version_new_block_topic` 一起设置时启用版本模式） |
 | `ready_ratio` | `0.8` | 副本节点就绪比例阈值 |
-| `check_num` | `3` | 节点轮询重试次数 |
-| `check_interval_ms` | `20` | 重试间隔（毫秒） |
+| `check_num` | - | 已废弃，不再生效（副本轮询改由 `check_timeout_ms` 限时） |
+| `check_interval_ms` | `20` | 副本轮询间隔（毫秒） |
+| `check_timeout_ms` | `2000` | 轮询 `ready_ratio` 比例副本追上新块高度的时长上限（毫秒），超时才判失败；每一轮 RPC 仍受 `rpc_node_timeout_ms` 约束 |
 | `rpc_node_timeout_ms` | `5000` | 单节点 RPC 超时（毫秒） |
 | `msg_wait_timeout` | `5000` | Kafka 消息拉取超时（毫秒） |
 | `consistency_db_path` | - | Pebble DB 数据目录 |

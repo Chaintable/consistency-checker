@@ -81,8 +81,9 @@ docker run consistency-checker -config /path/to/config.yml
 | `chain_id` | - | Blockchain network ID (required) |
 | `version` | - | Version identifier (enables version mode when set with `outer_version_new_block_topic`) |
 | `ready_ratio` | `0.8` | Fraction of replica nodes that must be synced |
-| `check_num` | `3` | Number of retry attempts for node polling |
-| `check_interval_ms` | `20` | Delay between retries (ms) |
+| `check_num` | - | Deprecated, ignored (replica polling is now bounded by `check_timeout_ms`) |
+| `check_interval_ms` | `20` | Replica polling interval (ms) |
+| `check_timeout_ms` | `2000` | How long to keep polling for `ready_ratio` of replicas to reach the notified height before failing (ms); each poll round is still bounded by `rpc_node_timeout_ms` |
 | `rpc_node_timeout_ms` | `5000` | Timeout per node RPC call (ms) |
 | `msg_wait_timeout` | `5000` | Kafka message fetch timeout (ms) |
 | `consistency_db_path` | - | Pebble DB data directory |
