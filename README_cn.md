@@ -66,11 +66,9 @@ cp config.yml my-config.yml
 ### Docker
 
 ```bash
-docker build -f Dockerfile.debank \
-  --build-arg ACCESS_TOKEN=<github-token> \
-  -t consistency-checker .
+docker build -t consistency-checker .
 
-docker run consistency-checker -config /path/to/config.yml
+docker run -v /path/to/config:/config consistency-checker -config /config/config.yml
 ```
 
 ## 配置项
@@ -180,6 +178,15 @@ Prometheus 指标通过 `GET /metrics` 暴露：
 | `pipeline_node_info` | Gauge | 节点/角色信息（标签：`chain_id`, `role`） |
 | `pipeline_block_num` | Gauge | 最新推送的区块高度 |
 | `pipeline_block_time` | Gauge | 最新推送的区块时间戳 |
+| `pipeline_replica_ready_wait_seconds` | Histogram | 等待副本追上通知高度的耗时 |
+| `pipeline_replica_ready_timeouts_total` | Counter | 副本未在 `check_timeout_ms` 内追上高度的次数 |
+| `pipeline_process_publish_seconds` | Histogram | 从开始处理 inner 通知到 outer 通知全部写完的耗时 |
+| `pipeline_block_ingress_to_outer_kafka_seconds` | Histogram | 从写节点收到区块到 outer Kafka 写入成功的端到端延迟（标签：`destination`） |
+| `pipeline_block_ingress_timing_ignored_total` | Counter | 因 ingress 时间缺失或非法而丢弃的延迟样本（标签：`destination`, `reason`） |
+| `pipeline_fork_scan_rewrites_total` | Counter | fork 巡检改写的对象数；非 0 说明标记曾被覆盖或此前失败 |
+| `pipeline_fork_scan_skipped_total` | Counter | 因 DB 中无 canonical 记录而跳过的高度数 |
+| `pipeline_fork_scan_errors_total` | Counter | fork 巡检错误数 |
+| `pipeline_drop_block_rewrite_failures_total` | Counter | drop block 的 fork 标记重试后仍失败的次数 |
 
 ## 许可证
 

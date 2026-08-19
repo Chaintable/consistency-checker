@@ -66,11 +66,9 @@ cp config.yml my-config.yml
 ### Docker
 
 ```bash
-docker build -f Dockerfile.debank \
-  --build-arg ACCESS_TOKEN=<github-token> \
-  -t consistency-checker .
+docker build -t consistency-checker .
 
-docker run consistency-checker -config /path/to/config.yml
+docker run -v /path/to/config:/config consistency-checker -config /config/config.yml
 ```
 
 ## Configuration
@@ -180,6 +178,15 @@ Prometheus metrics at `GET /metrics`:
 | `pipeline_node_info` | Gauge | Node/role information (labels: `chain_id`, `role`) |
 | `pipeline_block_num` | Gauge | Latest pushed block number |
 | `pipeline_block_time` | Gauge | Latest pushed block timestamp |
+| `pipeline_replica_ready_wait_seconds` | Histogram | Time spent waiting for enough replicas to reach the notified height |
+| `pipeline_replica_ready_timeouts_total` | Counter | Times replicas did not reach the height within `check_timeout_ms` |
+| `pipeline_process_publish_seconds` | Histogram | Time from starting to process an inner notification to all outer notices being written |
+| `pipeline_block_ingress_to_outer_kafka_seconds` | Histogram | Writer ingress to a successful outer Kafka write (label: `destination`) |
+| `pipeline_block_ingress_timing_ignored_total` | Counter | Latency samples dropped because ingress timing was missing or invalid (labels: `destination`, `reason`) |
+| `pipeline_fork_scan_rewrites_total` | Counter | Objects rewritten by the fork scan; non-zero means a mark was overwritten or previously failed |
+| `pipeline_fork_scan_skipped_total` | Counter | Heights skipped by the fork scan because the DB has no canonical record |
+| `pipeline_fork_scan_errors_total` | Counter | Fork scan errors |
+| `pipeline_drop_block_rewrite_failures_total` | Counter | Drop-block fork marks that still failed after retries |
 
 ## License
 
