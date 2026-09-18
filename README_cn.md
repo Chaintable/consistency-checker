@@ -84,6 +84,8 @@ docker run -v /path/to/config:/config consistency-checker -config /config/config
 | `check_timeout_ms` | `2000` | 轮询 `ready_ratio` 比例副本追上新块高度的时长上限（毫秒），超时才判失败；每一轮 RPC 仍受 `rpc_node_timeout_ms` 约束 |
 | `rpc_node_timeout_ms` | `5000` | 单节点 RPC 超时（毫秒） |
 | `msg_wait_timeout` | `5000` | Kafka 消息拉取超时（毫秒） |
+| `startup_gap_recovery_max_blocks` | `0` | 启动时最多从 S3 补齐的缺失通知数；`0` 禁用 |
+| `startup_gap_recovery_timeout_ms` | `10000` | 每次从 S3 读取并校验完整补块计划的超时（毫秒） |
 | `consistency_db_path` | - | Pebble DB 数据目录 |
 | `outer_s3_bucket` | - | S3 存储桶名称 |
 | `outer_s3_region` | - | S3 区域 |
@@ -102,6 +104,14 @@ docker run -v /path/to/config:/config consistency-checker -config /config/config
 | `fork_scan_lookback` | `64` | fork 标记巡检回看的高度数 |
 
 CLI 参数 `-config` 和 `-listen` 可覆盖配置文件中的值。
+
+### 启动时补齐缺失通知
+
+将 `startup_gap_recovery_max_blocks` 设为正数（例如 `64`）后，checker 在处理启动后的第一条有效输入通知前，对比该通知与已发布的输出高度。如果存在向前的高度缺口，会从新块的 `parentHash` 向前读取 S3 blockfile 和 validation，并要求父链连续连接到已发布的块。完整计划校验通过后，按高度逐块走原有的副本检查、数据库写入和输出发布流程，再处理原始输入通知。
+
+S3 缺文件、blockfile 与 validation 的计数或哈希不一致、分叉或超过补块上限时不会跳过缺口；失败会重试，原始输入 offset 保持未提交。部分发布失败沿用各输出目的地的重试记录，重启后从已发布高度继续。该功能不修改输入 topic，也不通过 RPC 重建历史 trace 或修复 S3 内容。
+
+恢复仅针对启动后的第一条有效输入通知；如果第一条通知已连续（或是重复通知），之后遇到的缺口仍由正常检查阻塞，需要再次重启才能尝试恢复。输出 topic 为空时走现有冷启动流程，没有历史基线可供补齐。关闭功能时行为保持不变。
 
 ## API
 
@@ -183,6 +193,8 @@ Prometheus 指标通过 `GET /metrics` 暴露：
 | `pipeline_process_publish_seconds` | Histogram | 从开始处理 inner 通知到 outer 通知全部写完的耗时 |
 | `pipeline_block_ingress_to_outer_kafka_seconds` | Histogram | 从写节点收到区块到 outer Kafka 写入成功的端到端延迟（标签：`destination`） |
 | `pipeline_block_ingress_timing_ignored_total` | Counter | 因 ingress 时间缺失或非法而丢弃的延迟样本（标签：`destination`, `reason`） |
+| `pipeline_startup_gap_recovered_blocks_total` | Counter | 启动恢复中完成处理的缺失块数 |
+| `pipeline_startup_gap_recovery_failures_total` | Counter | 启动恢复失败的尝试次数 |
 | `pipeline_fork_scan_rewrites_total` | Counter | fork 巡检改写的对象数；非 0 说明标记曾被覆盖或此前失败 |
 | `pipeline_fork_scan_skipped_total` | Counter | 因 DB 中无 canonical 记录而跳过的高度数 |
 | `pipeline_fork_scan_errors_total` | Counter | fork 巡检错误数 |

@@ -84,6 +84,8 @@ docker run -v /path/to/config:/config consistency-checker -config /config/config
 | `check_timeout_ms` | `2000` | How long to keep polling for `ready_ratio` of replicas to reach the notified height before failing (ms); each poll round is still bounded by `rpc_node_timeout_ms` |
 | `rpc_node_timeout_ms` | `5000` | Timeout per node RPC call (ms) |
 | `msg_wait_timeout` | `5000` | Kafka message fetch timeout (ms) |
+| `startup_gap_recovery_max_blocks` | `0` | Maximum missing notifications to recover from S3 at startup; `0` disables recovery |
+| `startup_gap_recovery_timeout_ms` | `10000` | Timeout for reading and validating the complete S3 recovery plan on each attempt (ms) |
 | `consistency_db_path` | - | Pebble DB data directory |
 | `outer_s3_bucket` | - | S3 bucket for block validation data |
 | `outer_s3_region` | - | S3 region |
@@ -102,6 +104,14 @@ docker run -v /path/to/config:/config consistency-checker -config /config/config
 | `fork_scan_lookback` | `64` | Number of recent heights re-checked by the fork-mark scan |
 
 CLI flags `-config` and `-listen` override the config file.
+
+### Recovering missing notifications at startup
+
+Set `startup_gap_recovery_max_blocks` to a positive limit (for example, `64`) to check the first valid input notification after startup against the published output tip. For a forward height gap, the checker follows the incoming block's `parentHash` backwards through S3 blockfiles and validation objects until it reaches the published block. It validates the entire plan before processing recovered blocks in height order through the existing replica checks, database writes, and outer publishing path, then processes the original notification.
+
+Missing S3 objects, blockfile/validation count or hash mismatches, forks, and gaps above the limit are not skipped: failures retry without committing the original input offset. Partial publish failures reuse per-destination retry tracking; after restart, recovery continues from the published tip. Recovery does not write to the input topic, reconstruct historical traces through RPC, or repair S3 contents.
+
+Recovery applies only to the first valid notification after startup. If that notification is already contiguous (or a duplicate), a later gap still blocks normal processing and requires another restart to attempt recovery. An empty output topic follows the existing cold-start path because no published baseline exists. Recovery is disabled by default.
 
 ## API
 
@@ -183,6 +193,8 @@ Prometheus metrics at `GET /metrics`:
 | `pipeline_process_publish_seconds` | Histogram | Time from starting to process an inner notification to all outer notices being written |
 | `pipeline_block_ingress_to_outer_kafka_seconds` | Histogram | Writer ingress to a successful outer Kafka write (label: `destination`) |
 | `pipeline_block_ingress_timing_ignored_total` | Counter | Latency samples dropped because ingress timing was missing or invalid (labels: `destination`, `reason`) |
+| `pipeline_startup_gap_recovered_blocks_total` | Counter | Missing blocks successfully processed during startup recovery |
+| `pipeline_startup_gap_recovery_failures_total` | Counter | Failed startup recovery attempts |
 | `pipeline_fork_scan_rewrites_total` | Counter | Objects rewritten by the fork scan; non-zero means a mark was overwritten or previously failed |
 | `pipeline_fork_scan_skipped_total` | Counter | Heights skipped by the fork scan because the DB has no canonical record |
 | `pipeline_fork_scan_errors_total` | Counter | Fork scan errors |
