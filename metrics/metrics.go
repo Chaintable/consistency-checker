@@ -3,6 +3,16 @@ package metrics
 import "github.com/prometheus/client_golang/prometheus"
 
 var (
+	StartupGapRecoveredBlocks = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pipeline",
+		Name:      "startup_gap_recovered_blocks_total",
+		Help:      "Missing block notifications successfully processed during startup recovery.",
+	})
+	StartupGapRecoveryFailures = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "pipeline",
+		Name:      "startup_gap_recovery_failures_total",
+		Help:      "Failed startup recovery attempts; the original Kafka offset is not committed.",
+	})
 	NodeInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "pipeline",
 		Name:      "node_info",
@@ -82,6 +92,7 @@ var (
 
 func init() {
 	prometheus.MustRegister(NodeInfo, LatestPushedBlockNumber, LatestPushedBlockTime,
+		StartupGapRecoveredBlocks, StartupGapRecoveryFailures,
 		ForkScanRewrites, ForkScanSkips, ForkScanErrors, DropBlockRewriteFailures,
 		BlockIngressToOuterKafkaLatency, BlockIngressTimingIgnored,
 		ReplicaReadyWait, ReplicaReadyTimeouts, ProcessPublishDuration)

@@ -59,6 +59,8 @@ type Checker struct {
 
 	// 限制预取 S3 请求的并发数，Checker 级共享，重试的 Process 不会各自再开一组
 	prefetchSem chan struct{}
+	// Only Run accesses this flag. Later gaps require another startup.
+	startupRecovered bool
 
 	// 以下两个函数字段默认指向真实实现，测试中可替换
 	checkReplicas func(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error)
@@ -321,32 +323,11 @@ func (c *Checker) getVersionBlockByHash(hash common.Hash) (*types.BlockContext, 
 	// 从 outer S3 的 blockfile（key 为 {chainID}/{version}/{hash}）读区块头。
 	// 注意：{hash}/block 这个独立 header 对象只存在于 inner bucket，checker 只配了
 	// outer bucket，故改用 outer 已有的 blockfile，其 block 段含 height/parent_id/timestamp。
-	s3Key := fmt.Sprintf("%d/%s/%s", c.config.ChainID, c.config.Version, hash.String())
-	obj, err := c.outerS3Reader.GetObject(
-		context.Background(),
-		&s3.GetObjectInput{
-			Bucket: &c.config.OuterS3Bucket,
-			Key:    &s3Key,
-		},
-	)
+	blockFile, err := c.readOuterBlockFile(context.Background(), hash)
 	if err != nil {
 		return nil, err
 	}
-	defer obj.Body.Close()
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(obj.Body)
-	blockFile := types.BlockFile{}
-	err = util.DecodeFromGzipJson(buf.Bytes(), &blockFile)
-	if err != nil {
-		return nil, err
-	}
-	blockCtx := &types.BlockContext{
-		BlockNumber: blockFile.Block.Height.Uint64(),
-		Hash:        hash,
-		ParentHash:  common.HexToHash(blockFile.Block.ParentID),
-		Timestamp:   blockFile.Block.Timestamp,
-	}
-	return blockCtx, nil
+	return blockContextFromFile(hash, blockFile)
 }
 
 // GetCommonAncestor 查找两个区块的共同祖先
@@ -1627,7 +1608,12 @@ func (c *Checker) Run() {
 					log.Printf("msg offset %d is same as last offset %d", msg.Offset, c.latestMsgOffset)
 					break
 				}
-				if !c.Process(blockNotice, blockTimings) {
+				select {
+				case <-c.quit:
+					return
+				default:
+				}
+				if !c.processInnerNotice(blockNotice, blockTimings) {
 					log.Printf("process error, retrying msg offset %d", msg.Offset)
 					time.Sleep(1 * time.Second)
 					continue
