@@ -60,12 +60,14 @@ type Checker struct {
 	// 限制预取 S3 请求的并发数，Checker 级共享，重试的 Process 不会各自再开一组
 	prefetchSem chan struct{}
 
-	// Protected by c.Mutex; schedule is used only by the scan worker.
+	// Protected by c.Mutex; reorgs also truncate the schedule and active batch.
 	forkState          *db.ForkScanState
 	forkRecoveryAnchor *db.ForkScanAnchor
+	forkRecoveryDrop   bool
 	forkAligned        bool
 	forkScanWG         sync.WaitGroup
 	forkSchedule       forkScanSchedule
+	forkBatch          *forkScanBatch
 
 	// 以下两个函数字段默认指向真实实现，测试中可替换
 	checkReplicas func(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error)
@@ -1124,6 +1126,9 @@ func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext, prefetched 
 		var next *db.ForkScanState
 		next, err = db.DB.WriteBlockInfosWithForkScan(newBlocks, validationHashes, c.config.ChainID, c.config.Version, c.forkState)
 		if err == nil {
+			if next.Generation != c.forkState.Generation {
+				c.rewindForkScan(newBlocks[0].BlockNumber, next.Generation)
+			}
 			c.forkState = next
 		}
 	} else {

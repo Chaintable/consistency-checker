@@ -255,7 +255,7 @@ func TestContinuousScanFailureDoesNotSkipAndCrashRepeats(t *testing.T) {
 			crashCtx, crash := context.WithCancel(context.Background())
 			defer crash()
 			m.afterPut = crash
-			err = c.scanForkBlocksAtHeight(crashCtx, 11, c.forkState.Generation, true)
+			_, err = c.scanContinuousBatch(crashCtx, 11, c.forkState.Generation)
 			if err == nil || c.forkState.NextHeight != 11 || !m.isFork(t, key) {
 				t.Fatalf("crash ordering: %v %+v", err, c.forkState)
 			}
@@ -353,7 +353,7 @@ func TestForkScanConcurrentReorgRejectsStalePlan(t *testing.T) {
 			}
 			generation := c.forkState.Generation
 			result := make(chan error, 1)
-			go func() { result <- c.scanForkBlocksAtHeight(context.Background(), 11, generation, true) }()
+			go func() { _, err := c.scanContinuousBatch(context.Background(), 11, generation); result <- err }()
 			select {
 			case <-entered:
 			case <-time.After(time.Second):
@@ -502,7 +502,7 @@ func TestForkScanWindowAndHeightBoundaries(t *testing.T) {
 	}
 	c.forkState.Published = db.ForkScanAnchor{Height: math.MaxUint64, Hash: b.Hash}
 	c.forkState.NextHeight = math.MaxUint64
-	if err := c.scanForkBlocksAtHeight(context.Background(), math.MaxUint64, c.forkState.Generation, true); err == nil || c.forkState.NextHeight != math.MaxUint64 {
+	if _, err := c.scanContinuousBatch(context.Background(), math.MaxUint64, c.forkState.Generation); err == nil || c.forkState.NextHeight != math.MaxUint64 {
 		t.Fatalf("terminal height wrapped: %v", err)
 	}
 }
@@ -555,7 +555,7 @@ func TestForkScanPutTimeoutReleasesProcessingLock(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	generation := c.forkState.Generation
-	go func() { done <- c.scanForkBlocksAtHeight(ctx, 11, generation, true) }()
+	go func() { _, err := c.scanContinuousBatch(ctx, 11, generation); done <- err }()
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
