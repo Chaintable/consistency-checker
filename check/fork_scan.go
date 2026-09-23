@@ -16,7 +16,7 @@ import (
 
 const (
 	forkScanBatchSize     = 128
-	forkScanBatchTimeout  = 10 * time.Second
+	forkScanBatchBudget   = 10 * time.Second
 	forkScanHeightTimeout = 5 * time.Second
 	// Only a single bounded PUT holds the processing lock, with no backoff.
 	// A failed PUT is retried by the next scan round.
@@ -39,6 +39,9 @@ func (c *Checker) loadForkScan() error {
 		return fmt.Errorf("load continuous fork scan: %w", err)
 	}
 	c.forkState = state
+	c.forkAligned = false
+	c.forkRecoveryAnchor = nil
+	c.forkSchedule = forkScanSchedule{}
 	if n := c.latestOuterBlockChangeNotification; n != nil {
 		if n.ChainID != c.config.ChainID || n.IsFork {
 			return fmt.Errorf("fork scan: invalid startup outer anchor")
@@ -46,8 +49,18 @@ func (c *Checker) loadForkScan() error {
 		c.forkRecoveryAnchor = &db.ForkScanAnchor{Height: n.BlockNumber, Hash: n.Hash}
 	}
 	if state != nil {
+		// A completed durable checkpoint matching both the startup outer anchor and
+		// local canonical index is already aligned. Do not require another Kafka
+		// message to scan existing backlog (the producer may currently be idle).
+		if state.Pending == nil && c.forkRecoveryAnchor != nil && state.Published == *c.forkRecoveryAnchor {
+			hash, ok, err := db.DB.GetCanonicalHashByNum(state.Published.Height)
+			if err != nil {
+				return fmt.Errorf("validate restored fork scan anchor: %w", err)
+			}
+			c.forkAligned = ok && hash == state.Published.Hash
+		}
 		metrics.ForkScanNextHeight.Set(float64(state.NextHeight))
-		log.Printf("fork scan restored: chain=%d version=%s baseline=%d next=%d generation=%d inner=%+v; waiting for inner/outer alignment", c.config.ChainID, c.config.Version, state.Baseline.Height, state.NextHeight, state.Generation, state.Position)
+		log.Printf("fork scan restored: chain=%d version=%s baseline=%d next=%d generation=%d inner=%+v aligned=%v (otherwise waiting for inner/outer alignment)", c.config.ChainID, c.config.Version, state.Baseline.Height, state.NextHeight, state.Generation, state.Position, c.forkAligned)
 	}
 	return nil
 }
@@ -82,7 +95,7 @@ func (c *Checker) initializeForkScan(anchor db.ForkScanAnchor, position *db.Fork
 
 // prepareForkScan is called with c.Lock only AFTER msgCheck or a matching
 // published-tail replay. It never changes the main flow's continuity rules.
-func (c *Checker) prepareForkScan(position *db.ForkScanPosition) bool {
+func (c *Checker) prepareForkScan(notice *types.BlockChangeNotification, position *db.ForkScanPosition) bool {
 	if !c.config.ContinuousForkScan() || c.forkAligned {
 		return true
 	}
@@ -90,6 +103,16 @@ func (c *Checker) prepareForkScan(position *db.ForkScanPosition) bool {
 	if anchor == nil {
 		return true
 	} // empty outer topic: establish a baseline after publication
+	// Window/disabled modes and older binaries do not maintain this cursor.
+	// A replay that proves the transition from the saved published head lets us
+	// repair its rewind without discarding backlog or requiring an offset gap.
+	if c.forkState != nil && c.forkState.Published != *anchor && c.isAlreadyProcessed(notice) && forkNoticeExtends(notice, c.forkState.Published) {
+		if err := c.reconcileForkScanReplay(notice, *anchor); err != nil {
+			log.Printf("fork scan replay reconciliation error: %v", err)
+			return false
+		}
+		return true
+	}
 	reason := "first state / rebuilt DB"
 	reset := c.forkState == nil
 	if s := c.forkState; s != nil && s.Position != nil && position != nil {
@@ -109,6 +132,66 @@ func (c *Checker) prepareForkScan(position *db.ForkScanPosition) bool {
 		}
 	}
 	return true
+}
+
+// forkNoticeExtends checks the transition from a saved head, not just whether
+// the new tail equals today's outer head. Heights also matter for a rewind.
+func forkNoticeExtends(notice *types.BlockChangeNotification, head db.ForkScanAnchor) bool {
+	if len(notice.NewBlocks) == 0 {
+		return false
+	}
+	first := notice.NewBlocks[0]
+	if len(notice.DropBlocks) == 0 {
+		return head.Height < math.MaxUint64 && first.BlockNumber == head.Height+1 && first.ParentHash == head.Hash
+	}
+	dropped := notice.DropBlocks
+	tail := dropped[len(dropped)-1]
+	return tail.BlockNumber == head.Height && tail.Hash == head.Hash &&
+		dropped[0].BlockNumber == first.BlockNumber && dropped[0].ParentHash == first.ParentHash
+}
+
+// The main path has already recognized a published-tail replay. Check the
+// canonical indexes for the entire replacement before trusting its rewind;
+// missing/corrupt indexes are errors, never an invitation to jump to latest.
+// Requires c.Lock. No canonical writes race with this metadata-only recovery.
+func (c *Checker) reconcileForkScanReplay(notice *types.BlockChangeNotification, anchor db.ForkScanAnchor) error {
+	s := c.forkState
+	if s.Pending != nil && *s.Pending != anchor {
+		return fmt.Errorf("replayed head does not match pending canonical update")
+	}
+	for i, block := range notice.NewBlocks {
+		if i > 0 {
+			prev := notice.NewBlocks[i-1]
+			if prev.BlockNumber == math.MaxUint64 || block.BlockNumber != prev.BlockNumber+1 || block.ParentHash != prev.Hash {
+				return fmt.Errorf("non-contiguous published replay at height %d", block.BlockNumber)
+			}
+		}
+		hash, ok, err := db.DB.GetCanonicalHashByNum(block.BlockNumber)
+		if err != nil {
+			return err
+		}
+		if !ok || hash != block.Hash {
+			return fmt.Errorf("published replay has no matching canonical at height %d", block.BlockNumber)
+		}
+	}
+	tail := notice.NewBlocks[len(notice.NewBlocks)-1]
+	if tail.BlockNumber != anchor.Height || tail.Hash != anchor.Hash {
+		return fmt.Errorf("published replay tail does not match recovery anchor")
+	}
+	next := *s
+	if len(notice.DropBlocks) > 0 {
+		if next.Generation == math.MaxUint64 {
+			return fmt.Errorf("fork scan generation overflow")
+		}
+		next.Generation++
+		next.NextHeight = min(next.NextHeight, notice.NewBlocks[0].BlockNumber)
+	}
+	next.Published, next.Pending = anchor, nil
+	if err := c.saveForkScan(&next); err != nil {
+		return err
+	}
+	log.Printf("fork scan reconciled published replay: head=%d hash=%s next=%d generation=%d", anchor.Height, anchor.Hash, next.NextHeight, next.Generation)
+	return nil
 }
 
 // finishForkScan persists the published anchor and message position BEFORE Run
@@ -229,9 +312,7 @@ func (c *Checker) runForkScan() {
 		wait := interval
 		upper, generation, ready := c.observeForkScan(time.Now)
 		if ready {
-			batchCtx, stop := context.WithTimeout(ctx, forkScanBatchTimeout)
-			more, err := c.scanContinuousBatch(batchCtx, upper, generation)
-			stop()
+			more, err := c.scanContinuousBatch(ctx, upper, generation)
 			if err != nil {
 				c.reportForkScanError(err)
 			} else if more {
@@ -244,6 +325,11 @@ func (c *Checker) runForkScan() {
 }
 
 func (c *Checker) scanContinuousBatch(ctx context.Context, upper, generation uint64) (bool, error) {
+	return c.scanContinuousBatchWithClock(ctx, upper, generation, time.Now)
+}
+
+func (c *Checker) scanContinuousBatchWithClock(ctx context.Context, upper, generation uint64, now func() time.Time) (bool, error) {
+	deadline := now().Add(forkScanBatchBudget)
 	for i := 0; i < forkScanBatchSize; i++ {
 		if err := ctx.Err(); err != nil {
 			return true, err
@@ -258,6 +344,12 @@ func (c *Checker) scanContinuousBatch(ctx context.Context, upper, generation uin
 		c.Unlock()
 		if height > upper {
 			return false, nil
+		}
+		// Budget exhaustion yields healthy backlog, not an S3 error/backoff. Finish
+		// the current height before yielding; each height retains its own deadline.
+		// Thus a batch takes at most its budget plus one bounded height's I/O.
+		if i > 0 && !now().Before(deadline) {
+			return true, nil
 		}
 		if err := c.scanForkBlocksAtHeight(ctx, height, generation, true); err != nil {
 			return true, err

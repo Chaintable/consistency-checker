@@ -274,7 +274,7 @@ func TestContinuousScanFailureDoesNotSkipAndCrashRepeats(t *testing.T) {
 			if err := c.loadForkScan(); err != nil {
 				t.Fatal(err)
 			}
-			if c.forkState.NextHeight != 11 || c.forkAligned {
+			if c.forkState.NextHeight != 11 || !c.forkAligned {
 				t.Fatal("bad restart")
 			}
 			if !c.processNotice(&types.BlockChangeNotification{NewBlocks: []types.BlockContext{scanBlock(12)}}, nil, scanPosition(11)) {

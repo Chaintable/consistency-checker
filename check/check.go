@@ -1188,19 +1188,19 @@ func (c *Checker) processNotice(blockNotice *types.BlockChangeNotification, bloc
 	// 0. 消息校验。两条短路路径不跳过 singleton 对齐：上一轮可能在通知已发出之后、
 	//    对齐失败时返回 false，重试时若直接提交，singleton 要等下一条消息才会补齐。
 	if c.isDuplicateBlockNotification(blockNotice) {
-		return c.prepareForkScan(position) && c.AlignOuterSingleton() && c.finishForkScan(position)
+		return c.prepareForkScan(blockNotice, position) && c.AlignOuterSingleton() && c.finishForkScan(position)
 	}
 	// 幂等短路：本消息 new 链尾已等于 latest，说明上次已处理到 WriteNewBlockNotice
 	// 只是整条 Process 未提交（如 reorg 消息后续步骤失败）。对齐后提交前进，避免死锁重试。
 	if c.isAlreadyProcessed(blockNotice) {
 		log.Printf("msg already processed (latest == newBlocks tail), align and advance")
-		return c.prepareForkScan(position) && c.AlignOuterSingleton() && c.finishForkScan(position)
+		return c.prepareForkScan(blockNotice, position) && c.AlignOuterSingleton() && c.finishForkScan(position)
 	}
 	if !c.msgCheck(blockNotice) {
 		log.Printf("msg check error")
 		return false
 	}
-	if !c.prepareForkScan(position) {
+	if !c.prepareForkScan(blockNotice, position) {
 		return false
 	}
 	c.beginNotice(blockNotice)
