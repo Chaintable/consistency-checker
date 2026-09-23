@@ -99,9 +99,31 @@ docker run -v /path/to/config:/config consistency-checker -config /config/config
 | `version_check_interval` | `5` | Leader version check interval (seconds) |
 | `commit_interval` | - | Kafka commit interval (seconds) |
 | `fork_scan_interval_sec` | `60` | Periodic fork-mark scan interval (seconds, <=0 disables) |
-| `fork_scan_lookback` | `64` | Number of recent heights re-checked by the fork-mark scan |
+| `fork_scan_lookback` | `64` | Positive: latest N heights; `0`: disabled; `-1`: persistent continuous scan; values below `-1` are rejected |
 
 CLI flags `-config` and `-listen` override the config file.
+
+### Continuous fork scan
+
+The default remains a scan of the latest 64 heights every 60 seconds. To cover every height after a recovery baseline, including chains that advance more than 64 blocks between scans, use:
+
+```yaml
+fork_scan_interval_sec: 60
+fork_scan_lookback: -1
+```
+
+Continuous mode observes the checker's fully published head and scans through the previous observation only after a full interval of elapsed time. It does not use block timestamps or run an additional recent-height scan. Slow scans and delayed timer events can extend the delay but cannot shorten it. A single background worker catches up in bounded batches; LIST/GET run outside the processing lock, and each locked PUT has a one-second deadline. Failures retain the next incomplete height for retry.
+
+Progress is stored in the existing `consistency_db_path` Pebble database, under `meta/fork-recheck/v1/<chainID>/<hex-encoded-version>`. Each height advances `next_scan_height` with a synchronous write only after all required S3 repairs and a final canonical/generation check succeed. Reorgs, including shorter chains, atomically update canonical indexes and rewind progress to the earliest affected height; old scan tasks cannot overwrite the rewind. Heights on the replacement branch wait for a fresh observation interval. A crash can repeat work, but cannot record a repair as complete before it succeeds.
+
+Recovery follows these rules:
+
+- A normal restart restores the cursor, waits for the existing inner/outer continuity check to align, and starts a fresh observation delay. Partially published canonical updates remain pending until the notification is successfully completed or replayed.
+- When no cursor exists (first enablement or a rebuilt DB), the fixed startup outer head `H/hash` becomes the baseline after inner alignment. Scanning starts at `H+1`; `H` and earlier heights are intentionally skipped, not reported as scanned. If the outer topic is empty, the first fully published notification establishes the baseline. The checker does not fetch an RPC head or reconstruct historical indexes.
+- With a retained DB, startup recovery recognizes a skipped inner range only when the incoming offset has a gap relative to the saved position in the same topic/partition, the startup outer anchor differs from the saved published anchor, and the incoming notification passes the existing continuity or published-tail replay check. It then uses that startup outer anchor as the new baseline and logs the evidence. This is deliberately limited: missing position evidence, a changed partition/topic, or an offset gap alone cannot identify every external group reset. An unaligned main flow keeps retrying; a missing canonical height stalls the scan. Neither case silently jumps to latest.
+- Read errors, corrupt metadata, S3 failures, and individual index holes never create a new baseline. Corrupt/unreadable cursor state fails startup. The checker does not delete local data or reset Kafka offsets automatically.
+
+The guarantee is one delayed check for each covered height. Objects uploaded or overwritten after that height's successful scan (for example, days later) may remain undetected; continuous mode does not repeatedly rescan all history. Known reorgs can revisit heights even below the initial baseline. `fork_scan_interval_sec <= 0` disables all scan modes, and an explicit `fork_scan_lookback: 0` also disables scanning. New binaries accept old configurations; old binaries cannot parse `-1`, so change it back to a positive value when rolling back the image.
 
 ## API
 
@@ -184,8 +206,10 @@ Prometheus metrics at `GET /metrics`:
 | `pipeline_block_ingress_to_outer_kafka_seconds` | Histogram | Writer ingress to a successful outer Kafka write (label: `destination`) |
 | `pipeline_block_ingress_timing_ignored_total` | Counter | Latency samples dropped because ingress timing was missing or invalid (labels: `destination`, `reason`) |
 | `pipeline_fork_scan_rewrites_total` | Counter | Objects rewritten by the fork scan; non-zero means a mark was overwritten or previously failed |
-| `pipeline_fork_scan_skipped_total` | Counter | Heights skipped by the fork scan because the DB has no canonical record |
+| `pipeline_fork_scan_skipped_total` | Counter | Attempts without a trusted canonical record; continuous mode stalls without advancing |
 | `pipeline_fork_scan_errors_total` | Counter | Fork scan errors |
+| `pipeline_fork_scan_next_height` | Gauge | Next incomplete height in continuous mode; the recovery baseline is intentionally skipped |
+| `pipeline_fork_scan_backlog` | Gauge | Published heights awaiting continuous scan, including the observation delay |
 | `pipeline_drop_block_rewrite_failures_total` | Counter | Drop-block fork marks that still failed after retries |
 
 ## License

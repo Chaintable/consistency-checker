@@ -1,8 +1,12 @@
 package config
 
 import (
+	"fmt"
+	"io"
 	"log"
+	"math"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,7 +36,7 @@ type Config struct {
 	EtcdLockTTL               int64    `yaml:"etcd_lock_ttl"`                 // etcd锁的ttl(秒)
 	VersionCheckInterval      int      `yaml:"version_check_interval"`        // 版本检查间隔(秒)
 	ForkScanInterval          int      `yaml:"fork_scan_interval_sec"`        // fork标记巡检间隔(秒)，<=0禁用
-	ForkScanLookback          uint64   `yaml:"fork_scan_lookback"`            // fork标记巡检回看的高度数
+	ForkScanLookback          int64    `yaml:"fork_scan_lookback"`            // >0窗口，0禁用，-1连续巡检
 }
 
 var defaultConfig = Config{
@@ -62,11 +66,31 @@ func LoadConfig(configPath string) Config {
 	}
 	defer configFile.Close()
 
-	var config Config = defaultConfig
-	parser := yaml.NewDecoder(configFile)
-	err = parser.Decode(&config)
+	config, err := decodeConfig(configFile)
 	if err != nil {
 		log.Fatalf("parse config file error: %v\n", err)
 	}
 	return config
+}
+
+func decodeConfig(r io.Reader) (Config, error) {
+	c := defaultConfig
+	if err := yaml.NewDecoder(r).Decode(&c); err != nil {
+		return c, err
+	}
+	return c, c.Validate()
+}
+
+func (c *Config) Validate() error {
+	if c.ForkScanLookback < -1 {
+		return fmt.Errorf("fork_scan_lookback must be -1 (continuous), 0 (disabled), or positive; got %d", c.ForkScanLookback)
+	}
+	if int64(c.ForkScanInterval) > math.MaxInt64/int64(time.Second) {
+		return fmt.Errorf("fork_scan_interval_sec exceeds the maximum supported duration")
+	}
+	return nil
+}
+
+func (c *Config) ContinuousForkScan() bool {
+	return c.ForkScanInterval > 0 && c.ForkScanLookback == -1
 }

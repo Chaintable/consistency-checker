@@ -25,7 +25,7 @@ var (
 		Name:      "fork_scan_rewrites_total",
 	})
 
-	// fork巡检因db中无canonical记录而跳过的高度数（冷启动/丢盘时增长）
+	// 缺少可信canonical的巡检次数；连续模式停在原高度重试，不推进游标。
 	ForkScanSkips = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "pipeline",
 		Name:      "fork_scan_skipped_total",
@@ -34,6 +34,18 @@ var (
 	ForkScanErrors = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "pipeline",
 		Name:      "fork_scan_errors_total",
+	})
+
+	ForkScanNextHeight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "pipeline",
+		Name:      "fork_scan_next_height",
+		Help:      "Next incomplete height in continuous fork scan mode (baseline is intentionally skipped).",
+	})
+
+	ForkScanBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "pipeline",
+		Name:      "fork_scan_backlog",
+		Help:      "Published heights awaiting continuous fork scan, including the observation delay.",
 	})
 
 	// drop block的fork标记改写最终失败次数（重试后仍失败）
@@ -83,6 +95,7 @@ var (
 func init() {
 	prometheus.MustRegister(NodeInfo, LatestPushedBlockNumber, LatestPushedBlockTime,
 		ForkScanRewrites, ForkScanSkips, ForkScanErrors, DropBlockRewriteFailures,
+		ForkScanNextHeight, ForkScanBacklog,
 		BlockIngressToOuterKafkaLatency, BlockIngressTimingIgnored,
 		ReplicaReadyWait, ReplicaReadyTimeouts, ProcessPublishDuration)
 }
