@@ -60,6 +60,15 @@ type Checker struct {
 	// 限制预取 S3 请求的并发数，Checker 级共享，重试的 Process 不会各自再开一组
 	prefetchSem chan struct{}
 
+	// Protected by c.Mutex; reorgs also truncate the schedule and active batch.
+	forkState          *db.ForkScanState
+	forkRecoveryAnchor *db.ForkScanAnchor
+	forkRecoveryDrop   bool
+	forkAligned        bool
+	forkScanWG         sync.WaitGroup
+	forkSchedule       forkScanSchedule
+	forkBatch          *forkScanBatch
+
 	// 以下两个函数字段默认指向真实实现，测试中可替换
 	checkReplicas func(kafkaLatestBlockNumber uint64) (*ReplicaStateChangeNotification, error)
 	writeOuter    func(writer *kafka.Writer, notice *types.OuterBlockChangeNotification) error
@@ -113,6 +122,9 @@ func (c *Checker) markDelivered(destination string, key outerNoticeKey) {
 }
 
 func NewChecker(config *config.Config) (*Checker, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 	err := db.OpenConsistencyDB(config.ConsistencyDBPath)
 	if err != nil {
 		log.Printf("open db error %+v", err)
@@ -172,11 +184,6 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		}
 		log.Printf("latestOuterVersionBlockChangeNotification %+v", latestOuterVersionBlockChangeNotification)
 		c.latestOuterBlockChangeNotification = latestOuterVersionBlockChangeNotification
-
-		err = c.InitLeaderFromEtcd()
-		if err != nil {
-			return nil, err
-		}
 	} else {
 		// 非版本模式：直接获取 OuterNewBlockTopic 的最新消息
 		log.Printf("legacy mode enabled: topic=%s", config.OuterNewBlockTopic)
@@ -189,6 +196,14 @@ func NewChecker(config *config.Config) (*Checker, error) {
 		c.latestOuterBlockChangeNotification = latestOuterBlockChangeNotification
 	}
 
+	if err := c.loadForkScan(); err != nil {
+		return nil, err
+	}
+	if config.IsVersionMode() {
+		if err := c.InitLeaderFromEtcd(); err != nil {
+			return nil, err
+		}
+	}
 	return c, nil
 }
 
@@ -438,7 +453,9 @@ func (c *Checker) getRawValidationByKeyCtx(ctx context.Context, s3Key string) (*
 	}
 	defer obj.Body.Close()
 	buf := new(bytes.Buffer)
-	buf.ReadFrom(obj.Body)
+	if _, err := buf.ReadFrom(obj.Body); err != nil {
+		return nil, err
+	}
 	validation := types.BlockValidation{}
 	err = util.DecodeFromGzipJson(buf.Bytes(), &validation)
 	if err != nil {
@@ -499,6 +516,10 @@ func (c *Checker) getRawValidationByKeyWithReTryCtx(ctx context.Context, s3Key s
 }
 
 func (c *Checker) rewriteValidationAtKey(s3Key string, validation *types.BlockValidation) error {
+	return c.rewriteValidationAtKeyCtx(context.Background(), s3Key, validation)
+}
+
+func (c *Checker) rewriteValidationAtKeyCtx(ctx context.Context, s3Key string, validation *types.BlockValidation) error {
 	data, err := util.EncodeToJsonGzip(validation)
 	if err != nil {
 		return err
@@ -508,7 +529,7 @@ func (c *Checker) rewriteValidationAtKey(s3Key string, validation *types.BlockVa
 		Key:    &s3Key,
 		Body:   bytes.NewReader(data),
 	}
-	_, err = c.outerS3Reader.PutObject(context.Background(), params)
+	_, err = c.outerS3Reader.PutObject(ctx, params)
 	if err != nil {
 		return err
 	}
@@ -541,10 +562,6 @@ func (c *Checker) blockValidationHashFromKey(key string) (string, bool) {
 		return "", false
 	}
 	return keyParts[2], true
-}
-
-func (c *Checker) listBlockValidationKeys(blockNumber uint64) ([]string, error) {
-	return c.listBlockValidationKeysCtx(context.Background(), blockNumber)
 }
 
 func (c *Checker) listBlockValidationKeysCtx(ctx context.Context, blockNumber uint64) ([]string, error) {
@@ -668,6 +685,10 @@ type forkRewrite struct {
 // hint 提供预取的 key 列表与 canonical validation：keys 为空时重新 LIST；预取列表里没有 canonical
 // （对象可能刚上传）时也会重新 LIST 一次再判定。
 func (c *Checker) planForkRewrites(block types.BlockContext, hint *blockPrefetch) ([]forkRewrite, error) {
+	return c.planForkRewritesCtx(context.Background(), block, hint)
+}
+
+func (c *Checker) planForkRewritesCtx(ctx context.Context, block types.BlockContext, hint *blockPrefetch) ([]forkRewrite, error) {
 	canonicalHash := block.Hash.String()
 	var keys []string
 	var canonicalValidation *types.BlockValidation
@@ -680,7 +701,7 @@ func (c *Checker) planForkRewrites(block types.BlockContext, hint *blockPrefetch
 	listed := false
 	if keys == nil {
 		var err error
-		if keys, err = c.listBlockValidationKeys(block.BlockNumber); err != nil {
+		if keys, err = c.listBlockValidationKeysCtx(ctx, block.BlockNumber); err != nil {
 			return nil, err
 		}
 		listed = true
@@ -695,7 +716,7 @@ func (c *Checker) planForkRewrites(block types.BlockContext, hint *blockPrefetch
 	}
 	if !hasCanonical(keys) && !listed {
 		var err error
-		if keys, err = c.listBlockValidationKeys(block.BlockNumber); err != nil {
+		if keys, err = c.listBlockValidationKeysCtx(ctx, block.BlockNumber); err != nil {
 			return nil, err
 		}
 	}
@@ -715,7 +736,7 @@ func (c *Checker) planForkRewrites(block types.BlockContext, hint *blockPrefetch
 		}
 		if validation == nil {
 			var err error
-			validation, err = c.getRawValidationByKeyWithReTry(key)
+			validation, err = c.getRawValidationByKeyWithReTryCtx(ctx, key)
 			if err != nil {
 				return nil, fmt.Errorf("get block validation error at height %d, hash %s: %w",
 					block.BlockNumber, existingHashStr, err)
@@ -767,99 +788,6 @@ func (c *Checker) rewriteForkBlocksAtHeight(block types.BlockContext, hint *bloc
 		return true, nil
 	}
 	return false, c.applyForkRewrites(block, plan)
-}
-
-// runForkScan 周期性巡检最近若干高度的fork标记。
-// rewriteForkBlocksAtSameHeight只在通知到达的瞬间检查同高度对象，
-// 之后被外部覆盖的is_fork标记（如上传方重启回放时的重复上传）没有任何机制能发现，
-// 巡检把一次性窗口变成持续收敛。
-func (c *Checker) runForkScan() {
-	interval := c.config.ForkScanInterval
-	if interval <= 0 || c.config.ForkScanLookback == 0 {
-		log.Printf("fork scan disabled")
-		return
-	}
-	log.Printf("fork scan enabled: interval %ds, lookback %d heights", interval, c.config.ForkScanLookback)
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-c.quit:
-			return
-		case <-ticker.C:
-			c.scanRecentForkBlocks()
-		}
-	}
-}
-
-func (c *Checker) scanRecentForkBlocks() {
-	c.Lock()
-	latest := c.latestOuterBlockChangeNotification
-	c.Unlock()
-	if latest == nil {
-		return
-	}
-	tip := latest.BlockNumber
-	start := uint64(0)
-	if lookback := c.config.ForkScanLookback; tip >= lookback {
-		start = tip - lookback + 1
-	}
-	for h := start; h <= tip; h++ {
-		c.scanForkBlocksAtHeight(h)
-	}
-}
-
-// scanForkBlocksAtHeight 巡检单个高度。S3 的 LIST/GET 不持 c.Lock 执行，避免每分钟一轮巡检
-// 挤占消息处理；只有真的需要改写时才持锁，并在持锁后复核 canonical 未被并发的 reorg 改变。
-func (c *Checker) scanForkBlocksAtHeight(height uint64) {
-	canonicalAt := func() (common.Hash, bool) {
-		// 巡检期间可能reorg到更短链，tip之上的高度没有canonical，跳过
-		if c.latestOuterBlockChangeNotification == nil || height > c.latestOuterBlockChangeNotification.BlockNumber {
-			return common.Hash{}, false
-		}
-		hash, ok, err := db.DB.GetCanonicalHashByNum(height)
-		if err != nil {
-			log.Printf("fork scan: get canonical hash at height %d error %+v", height, err)
-			metrics.ForkScanErrors.Inc()
-			return common.Hash{}, false
-		}
-		if !ok {
-			// db中没有该高度的记录（冷启动/丢盘），没有可信基准，跳过
-			metrics.ForkScanSkips.Inc()
-			return common.Hash{}, false
-		}
-		return hash, true
-	}
-
-	c.Lock()
-	hash, ok := canonicalAt()
-	c.Unlock()
-	if !ok {
-		return
-	}
-	plan, err := c.planForkRewrites(types.BlockContext{BlockNumber: height, Hash: hash}, nil)
-	if err != nil {
-		log.Printf("fork scan: plan at height %d error %+v", height, err)
-		metrics.ForkScanErrors.Inc()
-		return
-	}
-	if len(plan) == 0 {
-		return
-	}
-
-	c.Lock()
-	defer c.Unlock()
-	if current, ok := canonicalAt(); !ok || current != hash {
-		// 计算期间该高度已被 reorg 改写，放弃这份过期计划，下一轮巡检重算
-		return
-	}
-	if err := c.applyForkRewrites(types.BlockContext{BlockNumber: height, Hash: hash}, plan); err != nil {
-		log.Printf("fork scan: rewrite at height %d error %+v", height, err)
-		metrics.ForkScanErrors.Inc()
-		return
-	}
-	log.Printf("fork scan: rewrote fork marks at height %d", height)
-	metrics.ForkScanRewrites.Inc()
 }
 
 type ReplicaStateChangeNotification struct {
@@ -1193,7 +1121,19 @@ func (c *Checker) writeBlockInfoToDB(newBlocks []types.BlockContext, prefetched 
 		validationHashes[i] = prefetched[i].validation.ValidationHash
 	}
 
-	err := db.DB.WriteBlockInfos(newBlocks, validationHashes)
+	var err error
+	if c.forkState != nil && c.config.ContinuousForkScan() {
+		var next *db.ForkScanState
+		next, err = db.DB.WriteBlockInfosWithForkScan(newBlocks, validationHashes, c.config.ChainID, c.config.Version, c.forkState)
+		if err == nil {
+			if next.Generation != c.forkState.Generation {
+				c.rewindForkScan(newBlocks[0].BlockNumber, next.Generation)
+			}
+			c.forkState = next
+		}
+	} else {
+		err = db.DB.WriteBlockInfos(newBlocks, validationHashes)
+	}
 	if err != nil {
 		log.Printf("write block info error %+v", err)
 		return false
@@ -1241,21 +1181,31 @@ func (c *Checker) msgCheck(blockNotice *types.BlockChangeNotification) bool {
 }
 
 func (c *Checker) Process(blockNotice *types.BlockChangeNotification, blockTimings map[common.Hash]time.Time) bool {
+	return c.processNotice(blockNotice, blockTimings, nil)
+}
+
+func (c *Checker) processNotice(blockNotice *types.BlockChangeNotification, blockTimings map[common.Hash]time.Time, position *db.ForkScanPosition) bool {
 	c.Lock()
 	defer c.Unlock()
+	if len(blockNotice.NewBlocks) == 0 {
+		return false
+	}
 	// 0. 消息校验。两条短路路径不跳过 singleton 对齐：上一轮可能在通知已发出之后、
 	//    对齐失败时返回 false，重试时若直接提交，singleton 要等下一条消息才会补齐。
 	if c.isDuplicateBlockNotification(blockNotice) {
-		return c.AlignOuterSingleton()
+		return c.prepareForkScan(blockNotice, position) && c.AlignOuterSingleton() && c.finishForkScan(position)
 	}
 	// 幂等短路：本消息 new 链尾已等于 latest，说明上次已处理到 WriteNewBlockNotice
 	// 只是整条 Process 未提交（如 reorg 消息后续步骤失败）。对齐后提交前进，避免死锁重试。
 	if c.isAlreadyProcessed(blockNotice) {
 		log.Printf("msg already processed (latest == newBlocks tail), align and advance")
-		return c.AlignOuterSingleton()
+		return c.prepareForkScan(blockNotice, position) && c.AlignOuterSingleton() && c.finishForkScan(position)
 	}
 	if !c.msgCheck(blockNotice) {
 		log.Printf("msg check error")
+		return false
+	}
+	if !c.prepareForkScan(blockNotice, position) {
 		return false
 	}
 	c.beginNotice(blockNotice)
@@ -1315,6 +1265,9 @@ func (c *Checker) Process(blockNotice *types.BlockChangeNotification, blockTimin
 		return false
 	}
 
+	if !c.finishForkScan(position) {
+		return false
+	}
 	metrics.ProcessPublishDuration.Observe(time.Since(start).Seconds())
 
 	// 9. 通知已发出，再用一次新鲜的 LIST 复核同高度的 fork 标记：预取的列表是 Process 开头的
@@ -1594,7 +1547,8 @@ func (c *Checker) Run() {
 	defer close(c.done)
 	defer c.shutdown()
 
-	go c.runForkScan()
+	c.forkScanWG.Add(1)
+	go func() { defer c.forkScanWG.Done(); c.runForkScan() }()
 	for {
 		select {
 		case <-c.quit:
@@ -1623,11 +1577,16 @@ func (c *Checker) Run() {
 			}
 			blockTimings := util.DecodeBlockFirstSeenHeaders(msg.Headers)
 			for {
+				select {
+				case <-c.quit:
+					return
+				default:
+				}
 				if c.latestMsgOffset != 0 && msg.Offset <= c.latestMsgOffset {
 					log.Printf("msg offset %d is same as last offset %d", msg.Offset, c.latestMsgOffset)
 					break
 				}
-				if !c.Process(blockNotice, blockTimings) {
+				if !c.processNotice(blockNotice, blockTimings, &db.ForkScanPosition{Topic: msg.Topic, Partition: msg.Partition, Offset: msg.Offset}) {
 					log.Printf("process error, retrying msg offset %d", msg.Offset)
 					time.Sleep(1 * time.Second)
 					continue
@@ -1636,6 +1595,11 @@ func (c *Checker) Run() {
 				}
 			}
 			for {
+				select {
+				case <-c.quit:
+					return
+				default:
+				}
 				err = c.innerNewBlockReader.CommitMessages(context.Background(), msg)
 				if err != nil {
 					log.Printf("CommitMessages message error %+v", err)
@@ -1655,6 +1619,7 @@ func (c *Checker) Run() {
 }
 
 func (c *Checker) shutdown() {
+	c.forkScanWG.Wait()
 	nodes.NodeMap.StopWatch()
 	c.RevokeChainLeader()
 	c.innerNewBlockReader.Close()
