@@ -6,6 +6,7 @@ toolchain go1.23.9
 
 require (
 	github.com/Chaintable/pipeline v0.0.68
+	github.com/aws/aws-sdk-go-v2 v1.32.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.66.3
 	github.com/cockroachdb/pebble v1.1.2
 	github.com/ethereum/go-ethereum v1.15.11
@@ -20,7 +21,6 @@ require (
 	github.com/DataDog/zstd v1.5.6 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
-	github.com/aws/aws-sdk-go-v2 v1.32.5 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.6 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.28.5 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.46 // indirect
@@ -65,7 +65,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.5-0.20220116011046-fa5810519dcb // indirect
-	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
